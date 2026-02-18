@@ -1,0 +1,32 @@
+server:
+  host: "127.0.0.1"
+  port: 8080
+  mode: "debug"  # debug | release
+  csrf_secret: ""  # required in release mode; set via environment-specific config
+  cors:
+    allow_origins:
+      - "http://127.0.0.1:8080"
+database:
+  driver: "sqlite"  # sqlite | postgres
+  sqlite:
+    path: "data/app.db"
+  postgres:
+    host: "localhost"
+    port: 5432
+    user: "postgres"
+    password: ""
+    dbname: "gobase"
+    sslmode: "disable"
+  pool:                          # ★ M2: 连接池配置
+    max_idle_conns: 10
+    max_open_conns: 100
+    conn_max_lifetime: "1h"      # time.Duration 格式
+log:
+  level: "debug"  # debug | info | warn | error
+  format: "text"  # text | json
+  # color: true           # 控制台彩色输出（仅 format=text 时生效）
+  # file_path: ""         # 文件日志路径，留空或注释表示不启用文件日志
+  # max_size_mb: 100      # 单个日志文件最大大小（MB）
+  # retention_days: 30    # 日志文件保留天数
+  # max_backups: 10       # 最多保留的旧日志文件数量
+  # compress_rotated: true  # 是否 gzip 压缩轮转后的旧日志

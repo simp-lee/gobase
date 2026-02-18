@@ -1,0 +1,18 @@
+# Build output
+bin/
+*.exe
+
+# Database files
+data/*.db
+
+# Vendored frontend assets
+web/static/vendor/*.js
+web/static/vendor/*.css
+
+# IDE
+.idea/
+.vscode/
+
+# Temp
+tmp/
+.agents-work/

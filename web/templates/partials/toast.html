@@ -1,0 +1,29 @@
+{{ define "toast" }}
+{{/*
+    Toast 通知 partial（M6）
+
+    用法：在页面模板中 {{ template "toast" . }} 即可将服务端 flash 消息
+    自动推送到全局 toastManager()。
+
+    要求传入的数据结构包含可选字段：
+      .Flash.Success  string  – 成功提示（绿色）
+      .Flash.Error    string  – 错误提示（红色）
+      .Flash.Info     string  – 信息提示（蓝色）
+
+    全局 toast 容器和 toastManager() 已定义在 base.html + app.js 中，
+    本 partial 仅负责将服务端数据桥接到客户端 Alpine.js 事件。
+*/}}
+{{ if .Flash }}
+<div x-data x-init="
+    {{ if .Flash.Success }}
+        $dispatch('show-toast', { message: {{ json .Flash.Success }}, type: 'success' });
+    {{ end }}
+    {{ if .Flash.Error }}
+        $dispatch('show-toast', { message: {{ json .Flash.Error }}, type: 'error' });
+    {{ end }}
+    {{ if .Flash.Info }}
+        $dispatch('show-toast', { message: {{ json .Flash.Info }}, type: 'info' });
+    {{ end }}
+" class="hidden"></div>
+{{ end }}
+{{ end }}

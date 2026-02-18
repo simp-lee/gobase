@@ -1,0 +1,47 @@
+run:
+  go: "1.23"
+  timeout: 5m
+
+linters:
+  enable:
+    # Recommended
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - gosimple
+    - ineffassign
+    # Formatting & imports
+    - gofmt
+    - goimports
+    # Spelling
+    - misspell
+
+  disable:
+    - wsl
+    - gochecknoglobals
+    - gochecknoinits
+    - exhaustruct
+
+linters-settings:
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment
+  misspell:
+    locale: US
+  goimports:
+    local-prefixes: github.com/simp-lee/gobase
+
+issues:
+  exclude-rules:
+    # Test files: relax certain checks
+    - path: _test\.go
+      linters:
+        - errcheck
+        - govet
+    - path: _test\.go
+      text: "fieldalignment"
+  exclude-dirs:
+    - vendor
+    - data
