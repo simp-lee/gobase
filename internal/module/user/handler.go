@@ -19,7 +19,7 @@ func NewUserHandler(svc domain.UserService) *UserHandler {
 	return &UserHandler{svc: svc}
 }
 
-// Create handles POST /api/users.
+// Create handles POST /api/v1/users.
 func (h *UserHandler) Create(c *gin.Context) {
 	var req CreateUserRequest
 	if !pkg.BindAndValidate(c, &req) {
@@ -39,7 +39,7 @@ func (h *UserHandler) Create(c *gin.Context) {
 	})
 }
 
-// Get handles GET /api/users/:id.
+// Get handles GET /api/v1/users/:id.
 func (h *UserHandler) Get(c *gin.Context) {
 	id, err := parseID(c)
 	if err != nil {
@@ -56,7 +56,7 @@ func (h *UserHandler) Get(c *gin.Context) {
 	pkg.Success(c, user)
 }
 
-// List handles GET /api/users.
+// List handles GET /api/v1/users.
 func (h *UserHandler) List(c *gin.Context) {
 	req := pkg.ParsePageRequest(c)
 
@@ -69,7 +69,7 @@ func (h *UserHandler) List(c *gin.Context) {
 	pkg.List(c, result)
 }
 
-// Update handles PUT /api/users/:id.
+// Update handles PUT /api/v1/users/:id.
 func (h *UserHandler) Update(c *gin.Context) {
 	id, err := parseID(c)
 	if err != nil {
@@ -91,7 +91,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 	pkg.Success(c, user)
 }
 
-// Delete handles DELETE /api/users/:id.
+// Delete handles DELETE /api/v1/users/:id.
 func (h *UserHandler) Delete(c *gin.Context) {
 	id, err := parseID(c)
 	if err != nil {

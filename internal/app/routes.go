@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,22 +10,22 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
 	"github.com/simp-lee/gobase/internal/middleware"
-	"github.com/simp-lee/gobase/internal/module/user"
+	"github.com/simp-lee/gobase/internal/pkg"
 	"github.com/simp-lee/gobase/web"
 )
 
 // RouteDeps holds all dependencies needed to register routes.
 type RouteDeps struct {
-	UserHandler     *user.UserHandler
-	UserPageHandler *user.UserPageHandler
-	DB              *gorm.DB
-	Mode            string // "debug" or "release"
-	CSRFSecret      string
+	Modules    []Module
+	DB         *gorm.DB
+	Mode       string // "debug" or "release"
+	CSRFSecret string
 }
 
 // RegisterRoutes registers all application routes on the given gin.Engine.
@@ -35,11 +36,8 @@ func RegisterRoutes(r *gin.Engine, deps *RouteDeps) error {
 	if deps == nil {
 		return errors.New("route dependencies are nil")
 	}
-	if deps.UserHandler == nil {
-		return errors.New("user handler is nil")
-	}
-	if deps.UserPageHandler == nil {
-		return errors.New("user page handler is nil")
+	if len(deps.Modules) == 0 {
+		return errors.New("at least one module is required")
 	}
 	if strings.TrimSpace(deps.CSRFSecret) == "" {
 		return errors.New("csrf secret is required")
@@ -61,27 +59,18 @@ func RegisterRoutes(r *gin.Engine, deps *RouteDeps) error {
 	})
 
 	// API routes — no CSRF
-	api := r.Group("/api")
-	{
-		h := deps.UserHandler
-		api.POST("/users", h.Create)
-		api.GET("/users/:id", h.Get)
-		api.GET("/users", h.List)
-		api.PUT("/users/:id", h.Update)
-		api.DELETE("/users/:id", h.Delete)
-	}
+	api := r.Group("/api/v1")
 
 	// Page routes — with CSRF
 	pages := r.Group("/")
 	pages.Use(middleware.CSRF(deps.CSRFSecret))
-	{
-		ph := deps.UserPageHandler
-		pages.GET("/users", ph.ListPage)
-		pages.GET("/users/new", ph.NewPage)
-		pages.GET("/users/:id/edit", ph.EditPage)
-		pages.POST("/users", ph.CreateHTMX)
-		pages.PUT("/users/:id", ph.UpdateHTMX)
-		pages.DELETE("/users/:id", ph.DeleteHTMX)
+
+	// Register module routes
+	for i, m := range deps.Modules {
+		if m == nil {
+			return fmt.Errorf("module at index %d is nil", i)
+		}
+		m.RegisterRoutes(api, pages)
 	}
 
 	// NoRoute handler (M5)
@@ -115,10 +104,15 @@ func healthHandler(db *gorm.DB) gin.HandlerFunc {
 			dbStatus = "error"
 			status = "degraded"
 			code = http.StatusServiceUnavailable
-		} else if err = sqlDB.Ping(); err != nil {
-			dbStatus = "error"
-			status = "degraded"
-			code = http.StatusServiceUnavailable
+		} else {
+			ctx, cancel := context.WithTimeout(c.Request.Context(), time.Second)
+			defer cancel()
+			err = sqlDB.PingContext(ctx)
+			if err != nil {
+				dbStatus = "error"
+				status = "degraded"
+				code = http.StatusServiceUnavailable
+			}
 		}
 
 		c.JSON(code, gin.H{
@@ -134,16 +128,13 @@ func healthHandler(db *gorm.DB) gin.HandlerFunc {
 // requests or a JSON response for API clients.
 func noRouteHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		accept := strings.ToLower(c.GetHeader("Accept"))
-		if strings.Contains(accept, "text/html") {
-			c.HTML(http.StatusNotFound, "errors/404.html", gin.H{})
+		path := c.Request.URL.Path
+		if strings.HasPrefix(path, "/api/") {
+			c.JSON(http.StatusNotFound, pkg.Response{Code: http.StatusNotFound, Message: "not found"})
 			return
 		}
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    http.StatusNotFound,
-			"message": "not found",
-			"data":    nil,
-		})
+
+		renderError(c, http.StatusNotFound, "not found")
 	}
 }
 

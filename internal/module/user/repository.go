@@ -7,6 +7,7 @@ import (
 
 	"github.com/simp-lee/gobase/internal/domain"
 	"github.com/simp-lee/gobase/internal/pkg"
+	"github.com/simp-lee/pagination"
 	"gorm.io/gorm"
 )
 
@@ -43,25 +44,25 @@ func (r *userRepository) GetByID(ctx context.Context, id uint) (*domain.User, er
 	return &user, nil
 }
 
+// GetByEmail retrieves a user by email address.
+func (r *userRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
+	var user domain.User
+	if err := r.db.WithContext(ctx).Where("email = ?", email).First(&user).Error; err != nil {
+		return nil, mapError(err)
+	}
+	return &user, nil
+}
+
 // List returns a paginated, sorted, and filtered list of users.
-func (r *userRepository) List(ctx context.Context, req domain.PageRequest) (*domain.PageResult[domain.User], error) {
-	var total int64
-	base := r.db.WithContext(ctx).Model(&domain.User{}).
-		Scopes(pkg.Filter(req, allowedFilterFields))
-
-	if err := base.Count(&total).Error; err != nil {
+func (r *userRepository) List(ctx context.Context, req domain.PageRequest) (*pagination.Pagination[domain.User], error) {
+	result, err := pkg.PaginateGORM[domain.User](ctx, r.db.WithContext(ctx).Model(&domain.User{}), req, pkg.ListOptions{
+		SortFields:   allowedSortFields,
+		FilterFields: allowedFilterFields,
+	})
+	if err != nil {
 		return nil, mapError(err)
 	}
-
-	var users []domain.User
-	if err := base.Scopes(
-		pkg.Paginate(req),
-		pkg.Sort(req, allowedSortFields),
-	).Find(&users).Error; err != nil {
-		return nil, mapError(err)
-	}
-
-	return pkg.NewPageResult(users, total, req), nil
+	return result, nil
 }
 
 // Update saves changes to an existing user.

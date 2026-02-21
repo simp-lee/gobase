@@ -8,14 +8,13 @@ import (
 	"github.com/simp-lee/logger"
 )
 
-// SetupLogger creates a *logger.Logger based on the provided LogConfig,
-// sets it as the global default via slog.SetDefault, and returns it.
-// The caller is responsible for calling Close() on the returned logger.
-// Invalid level values default to "info"; when called with an unchecked config,
-// invalid format values fall back to "custom".
-func SetupLogger(cfg *LogConfig) (*logger.Logger, error) {
+// BuildLoggerOpts constructs a []logger.Option slice from the given LogConfig.
+// It is exported so that both the main application logger (via SetupLogger) and
+// middleware (e.g. ginx request logger) can share the same configuration logic.
+// If cfg is nil, it returns nil.
+func BuildLoggerOpts(cfg *LogConfig) []logger.Option {
 	if cfg == nil {
-		return nil, errors.New("log config is nil")
+		return nil
 	}
 
 	level := parseLevel(cfg.Level)
@@ -28,6 +27,7 @@ func SetupLogger(cfg *LogConfig) (*logger.Logger, error) {
 	case "json":
 		format = logger.FormatJSON
 	default:
+		slog.Warn("unrecognized log format, falling back to custom", slog.String("format", cfg.Format))
 		format = logger.FormatCustom
 	}
 
@@ -62,6 +62,21 @@ func SetupLogger(cfg *LogConfig) (*logger.Logger, error) {
 			opts = append(opts, logger.WithCompressRotated(*cfg.CompressRotated))
 		}
 	}
+
+	return opts
+}
+
+// SetupLogger creates a *logger.Logger based on the provided LogConfig,
+// sets it as the global default via slog.SetDefault, and returns it.
+// The caller is responsible for calling Close() on the returned logger.
+// Invalid level values default to "info"; when called with an unchecked config,
+// invalid format values fall back to "custom".
+func SetupLogger(cfg *LogConfig) (*logger.Logger, error) {
+	if cfg == nil {
+		return nil, errors.New("log config is nil")
+	}
+
+	opts := BuildLoggerOpts(cfg)
 
 	log, err := logger.New(opts...)
 	if err != nil {

@@ -1,4 +1,4 @@
-.PHONY: help build run dev test lint clean download-vendor
+.PHONY: help build run dev test lint clean download-vendor seed
 
 ## Default target: show help
 help: ## Show available commands
@@ -11,7 +11,8 @@ help: ## Show available commands
 	@echo  make test             - Run all tests with verbose output
 	@echo  make lint             - Run golangci-lint
 	@echo  make clean            - Remove build artifacts
-	@echo  make download-vendor  - Download frontend vendor assets (htmx, Alpine.js, Tailwind CSS)
+	@echo  make seed             - Seed the database with sample data
+	@echo  make download-vendor  - Download frontend vendor assets (htmx, Alpine.js, Tailwind v4)
 	@echo ""
 
 ## Build & Run
@@ -37,10 +38,14 @@ lint: ## Run golangci-lint
 clean: ## Remove build artifacts
 	rm -rf bin
 
+## Data
+seed: ## Seed database with sample data
+	go run ./cmd/seed -config configs/config.yaml
+
 ## Vendor assets
 download-vendor: ## Download frontend vendor assets
 	mkdir -p web/static/vendor
 	curl -sfL -o web/static/vendor/htmx.min.js https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js
 	curl -sfL -o web/static/vendor/alpine.min.js https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js
-	curl -sfL -o web/static/vendor/tailwind.css https://cdn.tailwindcss.com/4
+	curl -sfL -o web/static/vendor/tailwind.js https://unpkg.com/@tailwindcss/browser@4
 	@echo Vendor assets downloaded to web/static/vendor/

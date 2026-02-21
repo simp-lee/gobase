@@ -18,7 +18,7 @@ func setupAPIRouter(h *UserHandler) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
-	api := r.Group("/api/users")
+	api := r.Group("/api/v1/users")
 	api.POST("", h.Create)
 	api.GET("", h.List)
 	api.GET("/:id", h.Get)
@@ -34,7 +34,7 @@ func TestUserHandler_Create(t *testing.T) {
 	r := setupAPIRouter(h)
 
 	body := `{"name":"Alice","email":"alice@example.com"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/users", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -62,7 +62,7 @@ func TestUserHandler_Create_ValidationError(t *testing.T) {
 
 	// Missing required fields
 	body := `{"name":"","email":""}`
-	req := httptest.NewRequest(http.MethodPost, "/api/users", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -99,7 +99,7 @@ func TestUserHandler_Create_ServiceError(t *testing.T) {
 	r := setupAPIRouter(h)
 
 	body := `{"name":"Alice","email":"alice@example.com"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/users", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -120,7 +120,7 @@ func TestUserHandler_Get(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/users/1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/1", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -142,7 +142,7 @@ func TestUserHandler_Get_NotFound(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/users/999", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/999", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -156,7 +156,7 @@ func TestUserHandler_Get_InvalidID(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/users/abc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/abc", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -180,7 +180,7 @@ func TestUserHandler_List(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/users?page=1&page_size=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users?page=1&page_size=10", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -209,7 +209,7 @@ func TestUserHandler_List_PaginationParams(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/users?page=2&page_size=5", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users?page=2&page_size=5", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -226,11 +226,11 @@ func TestUserHandler_List_PaginationParams(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected Data to be a map, got %T", resp.Data)
 	}
-	if page, _ := data["page"].(float64); int(page) != 2 {
-		t.Errorf("expected page=2, got %v", data["page"])
+	if page, _ := data["current_page"].(float64); int(page) != 2 {
+		t.Errorf("expected current_page=2, got %v", data["current_page"])
 	}
-	if pageSize, _ := data["page_size"].(float64); int(pageSize) != 5 {
-		t.Errorf("expected page_size=5, got %v", data["page_size"])
+	if pageSize, _ := data["items_per_page"].(float64); int(pageSize) != 5 {
+		t.Errorf("expected items_per_page=5, got %v", data["items_per_page"])
 	}
 }
 
@@ -240,7 +240,7 @@ func TestUserHandler_List_ServiceError(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -260,7 +260,7 @@ func TestUserHandler_Update(t *testing.T) {
 	r := setupAPIRouter(h)
 
 	body := `{"name":"Alice Updated","email":"alice2@example.com"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/users/1", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/1", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -284,7 +284,7 @@ func TestUserHandler_Update_InvalidID(t *testing.T) {
 	r := setupAPIRouter(h)
 
 	body := `{"name":"Alice","email":"alice@example.com"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/users/abc", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/abc", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -300,7 +300,7 @@ func TestUserHandler_Update_ValidationError(t *testing.T) {
 	r := setupAPIRouter(h)
 
 	body := `{"name":"","email":"invalid"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/users/1", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/1", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -330,7 +330,7 @@ func TestUserHandler_Update_NotFound(t *testing.T) {
 	r := setupAPIRouter(h)
 
 	body := `{"name":"Alice","email":"alice@example.com"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/users/999", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/999", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -350,7 +350,7 @@ func TestUserHandler_Delete(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/users/1", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/users/1", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -364,7 +364,7 @@ func TestUserHandler_Delete_NotFound(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/users/999", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/users/999", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -378,7 +378,7 @@ func TestUserHandler_Delete_InvalidID(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/users/abc", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/users/abc", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

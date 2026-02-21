@@ -2,10 +2,39 @@ server:
   host: "127.0.0.1"
   port: 8080
   mode: "debug"  # debug | release
-  csrf_secret: ""  # required in release mode; set via environment-specific config
+  csrf_secret: ""  # required in release mode; use >=32 chars and include at least 3 classes (lower/upper/digit/symbol)
+  timeout: "30s"
   cors:
     allow_origins:
       - "http://127.0.0.1:8080"
+    allow_methods:
+      - "GET"
+      - "POST"
+      - "PUT"
+      - "PATCH"
+      - "DELETE"
+      - "OPTIONS"
+    allow_headers:
+      - "Origin"
+      - "Content-Type"
+      - "Accept"
+      - "Authorization"
+      - "X-Requested-With"
+      - "X-CSRF-Token"
+      - "HX-Request"
+      - "HX-Current-URL"
+      - "HX-Target"
+      - "HX-Trigger"
+    allow_credentials: false
+    max_age: "24h"
+  rate_limit:
+    enabled: true
+    rps: 100  # supports decimal; middleware uses ceil(rps) with minimum 1
+    burst: 200
+  cache:
+    enabled: false    # set to true to enable HTTP response caching
+    ttl: "5m"         # cache entry time-to-live
+    max_size: 1000    # maximum number of cached entries
 database:
   driver: "sqlite"  # sqlite | postgres
   sqlite:
@@ -16,11 +45,27 @@ database:
     user: "postgres"
     password: ""
     dbname: "gobase"
-    sslmode: "disable"
+    sslmode: "require"
   pool:                          # ★ M2: 连接池配置
     max_idle_conns: 10
     max_open_conns: 100
     conn_max_lifetime: "1h"      # time.Duration 格式
+auth:
+  enabled: false
+  jwt_secret: ""
+  token_expiry: "24h"
+  public_paths:
+    - "/api/v1/auth/login"
+    - "/api/v1/auth/register"
+  rbac:
+    enabled: false
+    cache:
+      role_ttl: "5m"
+      user_role_ttl: "5m"
+      permission_ttl: "5m"
+      max_role_entries: 1000
+      max_user_entries: 5000
+      max_permission_entries: 10000
 log:
   level: "debug"  # debug | info | warn | error
   format: "text"  # text | json

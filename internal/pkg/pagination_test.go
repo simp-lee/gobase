@@ -1,13 +1,17 @@
 package pkg
 
 import (
+	"context"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/simp-lee/gobase/internal/domain"
 	"gorm.io/gorm"
 	dbtest "gorm.io/gorm/utils/tests"
@@ -45,10 +49,10 @@ func TestParsePageRequest_Defaults(t *testing.T) {
 
 func TestParsePageRequest_CustomValues(t *testing.T) {
 	c := newTestContext(url.Values{
-		"page":      {"3"},
-		"page_size": {"50"},
-		"sort":      {"name:asc"},
-		"status":    {"active"},
+		"page":       {"3"},
+		"page_size":  {"50"},
+		"sort":       {"name:asc"},
+		"status":     {"active"},
 		"name__like": {"john"},
 	})
 	pr := ParsePageRequest(c)
@@ -124,90 +128,6 @@ func TestParsePageRequest_EmptyFilterValuesIgnored(t *testing.T) {
 	}
 	if pr.Filter["name"] != "john" {
 		t.Errorf("expected Filter[name]=john, got %s", pr.Filter["name"])
-	}
-}
-
-func TestNewPageResult(t *testing.T) {
-	tests := []struct {
-		name       string
-		items      []string
-		total      int64
-		page       int
-		pageSize   int
-		wantPages  int
-		wantItems  int
-	}{
-		{
-			name:      "exact division",
-			items:     []string{"a", "b"},
-			total:     10,
-			page:      1,
-			pageSize:  5,
-			wantPages: 2,
-			wantItems: 2,
-		},
-		{
-			name:      "with remainder",
-			items:     []string{"a"},
-			total:     11,
-			page:      3,
-			pageSize:  5,
-			wantPages: 3,
-			wantItems: 1,
-		},
-		{
-			name:      "zero total",
-			items:     nil,
-			total:     0,
-			page:      1,
-			pageSize:  20,
-			wantPages: 0,
-			wantItems: 0,
-		},
-		{
-			name:      "single page",
-			items:     []string{"a", "b", "c"},
-			total:     3,
-			page:      1,
-			pageSize:  20,
-			wantPages: 1,
-			wantItems: 3,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := domain.PageRequest{Page: tt.page, PageSize: tt.pageSize}
-			result := NewPageResult(tt.items, tt.total, req)
-
-			if result.TotalPages != tt.wantPages {
-				t.Errorf("TotalPages: want %d, got %d", tt.wantPages, result.TotalPages)
-			}
-			if len(result.Items) != tt.wantItems {
-				t.Errorf("Items count: want %d, got %d", tt.wantItems, len(result.Items))
-			}
-			if result.Total != tt.total {
-				t.Errorf("Total: want %d, got %d", tt.total, result.Total)
-			}
-			if result.Page != tt.page {
-				t.Errorf("Page: want %d, got %d", tt.page, result.Page)
-			}
-			if result.PageSize != tt.pageSize {
-				t.Errorf("PageSize: want %d, got %d", tt.pageSize, result.PageSize)
-			}
-		})
-	}
-}
-
-func TestNewPageResult_NilItemsBecomesEmptySlice(t *testing.T) {
-	req := domain.PageRequest{Page: 1, PageSize: 10}
-	result := NewPageResult[string](nil, 0, req)
-
-	if result.Items == nil {
-		t.Error("expected non-nil Items slice")
-	}
-	if len(result.Items) != 0 {
-		t.Errorf("expected empty Items, got %d items", len(result.Items))
 	}
 }
 
@@ -411,29 +331,303 @@ func TestPaginate(t *testing.T) {
 	}
 }
 
-// --------------- NewPageResult: additional TotalPages calculations ---------------
+// --------------- PaginateGORM ---------------
 
-func TestNewPageResult_AdditionalCalculations(t *testing.T) {
-	tests := []struct {
-		name      string
-		total     int64
-		pageSize  int
-		wantPages int
-	}{
-		{"25 items / 10 per page = 3 pages", 25, 10, 3},
-		{"20 items / 10 per page = 2 pages", 20, 10, 2},
-		{"1 item / 10 per page = 1 page", 1, 10, 1},
-		{"99 items / 10 per page = 10 pages", 99, 10, 10},
-		{"100 items / 100 per page = 1 page", 100, 100, 1},
+// paginationTestItem is a minimal model for PaginateGORM tests.
+type paginationTestItem struct {
+	ID   uint   `gorm:"primaryKey"`
+	Name string `gorm:"size:100"`
+}
+
+func newSQLiteTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&paginationTestItem{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return db
+}
+
+func seedItems(t *testing.T, db *gorm.DB, n int) {
+	t.Helper()
+	for i := 1; i <= n; i++ {
+		if err := db.Create(&paginationTestItem{Name: "item_" + strconv.Itoa(i)}).Error; err != nil {
+			t.Fatalf("seed item %d: %v", i, err)
+		}
+	}
+}
+
+func TestPaginateGORM_BasicPagination(t *testing.T) {
+	db := newSQLiteTestDB(t)
+	seedItems(t, db, 25)
+	ctx := context.Background()
+
+	req := domain.PageRequest{Page: 1, PageSize: 10, Sort: "id:asc"}
+	opts := ListOptions{SortFields: []string{"id", "name"}}
+
+	result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+	if err != nil {
+		t.Fatalf("PaginateGORM: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := domain.PageRequest{Page: 1, PageSize: tt.pageSize}
-			result := NewPageResult([]string{}, tt.total, req)
-			if result.TotalPages != tt.wantPages {
-				t.Errorf("TotalPages: want %d, got %d", tt.wantPages, result.TotalPages)
-			}
-		})
+	if result.TotalItems != 25 {
+		t.Errorf("TotalItems: want 25, got %d", result.TotalItems)
+	}
+	if len(result.Items) != 10 {
+		t.Errorf("Items count: want 10, got %d", len(result.Items))
+	}
+	if result.CurrentPage != 1 {
+		t.Errorf("CurrentPage: want 1, got %d", result.CurrentPage)
+	}
+	if result.TotalPages != 3 {
+		t.Errorf("TotalPages: want 3, got %d", result.TotalPages)
+	}
+	if result.ItemsPerPage != 10 {
+		t.Errorf("ItemsPerPage: want 10, got %d", result.ItemsPerPage)
+	}
+}
+
+func TestPaginateGORM_SecondPage(t *testing.T) {
+	db := newSQLiteTestDB(t)
+	seedItems(t, db, 25)
+	ctx := context.Background()
+
+	req := domain.PageRequest{Page: 2, PageSize: 10, Sort: "id:asc"}
+	opts := ListOptions{SortFields: []string{"id"}}
+
+	result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+	if err != nil {
+		t.Fatalf("PaginateGORM: %v", err)
+	}
+
+	if len(result.Items) != 10 {
+		t.Errorf("Items count: want 10, got %d", len(result.Items))
+	}
+	// Second page with id:asc should start at id=11
+	if result.Items[0].ID != 11 {
+		t.Errorf("first item ID: want 11, got %d", result.Items[0].ID)
+	}
+}
+
+func TestPaginateGORM_LastPagePartial(t *testing.T) {
+	db := newSQLiteTestDB(t)
+	seedItems(t, db, 25)
+	ctx := context.Background()
+
+	req := domain.PageRequest{Page: 3, PageSize: 10, Sort: "id:asc"}
+	opts := ListOptions{SortFields: []string{"id"}}
+
+	result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+	if err != nil {
+		t.Fatalf("PaginateGORM: %v", err)
+	}
+
+	if len(result.Items) != 5 {
+		t.Errorf("Items count: want 5, got %d", len(result.Items))
+	}
+	if result.TotalItems != 25 {
+		t.Errorf("TotalItems: want 25, got %d", result.TotalItems)
+	}
+}
+
+func TestPaginateGORM_WithFilter(t *testing.T) {
+	db := newSQLiteTestDB(t)
+	seedItems(t, db, 10)
+	// Add specific items to filter on
+	db.Create(&paginationTestItem{Name: "special"})
+	db.Create(&paginationTestItem{Name: "special"})
+	ctx := context.Background()
+
+	req := domain.PageRequest{
+		Page:     1,
+		PageSize: 10,
+		Sort:     "id:asc",
+		Filter:   map[string]string{"name": "special"},
+	}
+	opts := ListOptions{
+		SortFields:   []string{"id", "name"},
+		FilterFields: []string{"name"},
+	}
+
+	result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+	if err != nil {
+		t.Fatalf("PaginateGORM: %v", err)
+	}
+
+	if result.TotalItems != 2 {
+		t.Errorf("TotalItems: want 2, got %d", result.TotalItems)
+	}
+	if len(result.Items) != 2 {
+		t.Errorf("Items count: want 2, got %d", len(result.Items))
+	}
+}
+
+func TestPaginateGORM_EmptyResult(t *testing.T) {
+	db := newSQLiteTestDB(t)
+	ctx := context.Background()
+
+	req := domain.PageRequest{Page: 1, PageSize: 10, Sort: "id:asc"}
+	opts := ListOptions{SortFields: []string{"id"}}
+
+	result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+	if err != nil {
+		t.Fatalf("PaginateGORM: %v", err)
+	}
+
+	if result.TotalItems != 0 {
+		t.Errorf("TotalItems: want 0, got %d", result.TotalItems)
+	}
+	if len(result.Items) != 0 {
+		t.Errorf("Items count: want 0, got %d", len(result.Items))
+	}
+}
+
+func TestPaginateGORM_SortDesc(t *testing.T) {
+	db := newSQLiteTestDB(t)
+	seedItems(t, db, 5)
+	ctx := context.Background()
+
+	req := domain.PageRequest{Page: 1, PageSize: 10, Sort: "id:desc"}
+	opts := ListOptions{SortFields: []string{"id"}}
+
+	result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+	if err != nil {
+		t.Fatalf("PaginateGORM: %v", err)
+	}
+
+	if len(result.Items) != 5 {
+		t.Fatalf("Items count: want 5, got %d", len(result.Items))
+	}
+	// First item should have highest ID
+	if result.Items[0].ID != 5 {
+		t.Errorf("first item ID: want 5, got %d", result.Items[0].ID)
+	}
+}
+
+func TestPaginateGORM_LikeFilter_SpecialChars(t *testing.T) {
+	db := newSQLiteTestDB(t)
+
+	// Insert test records with special LIKE characters in names.
+	// Discriminating rows: "1001 Bob" matches unescaped %100%% (contains "100") but not escaped %100\%%;
+	// "BobXSmith" matches unescaped %Bob_Smith% (any char for _) but not escaped %Bob\_Smith%.
+	items := []paginationTestItem{
+		{Name: "100% Alice"},
+		{Name: "Bob_Smith"},
+		{Name: `Charlie\Backslash`},
+		{Name: "Dave Plain"},
+		{Name: "1001 Bob"},
+		{Name: "BobXSmith"},
+	}
+	for i := range items {
+		if err := db.Create(&items[i]).Error; err != nil {
+			t.Fatalf("seed item: %v", err)
+		}
+	}
+
+	ctx := context.Background()
+	opts := ListOptions{
+		SortFields:   []string{"id"},
+		FilterFields: []string{"name"},
+	}
+
+	t.Run("percent sign is literal", func(t *testing.T) {
+		req := domain.PageRequest{
+			Page: 1, PageSize: 10, Sort: "id:asc",
+			Filter: map[string]string{"name__like": "100%"},
+		}
+		result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+		if err != nil {
+			t.Fatalf("PaginateGORM: %v", err)
+		}
+		if result.TotalItems != 1 {
+			t.Errorf("TotalItems: want 1 (only '100%% Alice'), got %d", result.TotalItems)
+		}
+		if result.TotalItems == 1 && result.Items[0].Name != "100% Alice" {
+			t.Errorf("expected '100%%%% Alice', got %q", result.Items[0].Name)
+		}
+	})
+
+	t.Run("underscore is literal", func(t *testing.T) {
+		req := domain.PageRequest{
+			Page: 1, PageSize: 10, Sort: "id:asc",
+			Filter: map[string]string{"name__like": "Bob_Smith"},
+		}
+		result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+		if err != nil {
+			t.Fatalf("PaginateGORM: %v", err)
+		}
+		if result.TotalItems != 1 {
+			t.Errorf("TotalItems: want 1 (only 'Bob_Smith'), got %d", result.TotalItems)
+		}
+		if result.TotalItems == 1 && result.Items[0].Name != "Bob_Smith" {
+			t.Errorf("expected 'Bob_Smith', got %q", result.Items[0].Name)
+		}
+	})
+
+	t.Run("backslash is literal", func(t *testing.T) {
+		req := domain.PageRequest{
+			Page: 1, PageSize: 10, Sort: "id:asc",
+			Filter: map[string]string{"name__like": `Charlie\`},
+		}
+		result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+		if err != nil {
+			t.Fatalf("PaginateGORM: %v", err)
+		}
+		if result.TotalItems != 1 {
+			t.Errorf(`TotalItems: want 1 (only 'Charlie\Backslash'), got %d`, result.TotalItems)
+		}
+	})
+}
+
+func TestPaginateGORM_CountError(t *testing.T) {
+	db := newSQLiteTestDB(t)
+	ctx := context.Background()
+
+	req := domain.PageRequest{Page: 1, PageSize: 10, Sort: "id:asc"}
+	opts := ListOptions{SortFields: []string{"id"}}
+
+	result, err := PaginateGORM[paginationTestItem](ctx, db.Table("missing_table"), req, opts)
+	if err == nil {
+		t.Fatal("expected error when count query fails, got nil")
+	}
+	if result != nil {
+		t.Fatalf("expected nil result when count query fails, got %+v", result)
+	}
+}
+
+func TestPaginateGORM_FindError(t *testing.T) {
+	db := newSQLiteTestDB(t)
+	seedItems(t, db, 3)
+	ctx := context.Background()
+
+	callbackName := "test:force_find_error"
+	errFind := errors.New("forced find error")
+	if err := db.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if _, isCount := tx.Statement.Dest.(*int64); isCount {
+			return
+		}
+		tx.AddError(errFind)
+	}); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Callback().Query().Remove(callbackName)
+	})
+
+	req := domain.PageRequest{Page: 1, PageSize: 10, Sort: "id:asc"}
+	opts := ListOptions{SortFields: []string{"id"}}
+
+	result, err := PaginateGORM[paginationTestItem](ctx, db.Model(&paginationTestItem{}), req, opts)
+	if err == nil {
+		t.Fatal("expected error when find query fails, got nil")
+	}
+	if !errors.Is(err, errFind) {
+		t.Fatalf("expected wrapped forced find error, got %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected nil result when find query fails, got %+v", result)
 	}
 }

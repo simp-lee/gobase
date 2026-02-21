@@ -1,24 +1,9 @@
 /* ==========================================================================
    GoBase – app.css
    Custom styles for the GoBase framework.
-   Tailwind CSS handles most styling; this file covers resets, overrides,
-   and animations that Tailwind does not provide out of the box.
+   Tailwind v4 (browser JIT) handles base resets via Preflight;
+   this file only covers animations that Tailwind does not provide.
    ========================================================================== */
-
-/* --------------------------------------------------------------------------
-   Base resets / overrides
-   -------------------------------------------------------------------------- */
-
-*,
-*::before,
-*::after {
-    box-sizing: border-box;
-}
-
-body {
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-}
 
 /* --------------------------------------------------------------------------
    Toast notification animations

@@ -1,6 +1,7 @@
 # Build output
 bin/
 *.exe
+seed
 
 # Database files
 data/*.db

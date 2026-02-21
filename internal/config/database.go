@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -95,6 +96,9 @@ func configurePool(db *gorm.DB, pool *PoolConfig) error {
 	if err != nil {
 		return fmt.Errorf("invalid pool.conn_max_lifetime %q: %w", pool.ConnMaxLifetime, err)
 	}
+	if lifetime <= 0 {
+		return fmt.Errorf("invalid pool.conn_max_lifetime %q: must be greater than 0", pool.ConnMaxLifetime)
+	}
 	sqlDB.SetConnMaxLifetime(lifetime)
 
 	return nil
@@ -115,6 +119,7 @@ func effectiveMaxOpenConns(v int) int {
 }
 
 func effectiveConnMaxLifetime(v string) string {
+	v = strings.TrimSpace(v)
 	if v == "" {
 		return "1h"
 	}

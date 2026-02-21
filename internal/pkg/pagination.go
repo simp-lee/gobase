@@ -1,7 +1,7 @@
 package pkg
 
 import (
-	"math"
+	"context"
 	"regexp"
 	"slices"
 	"strconv"
@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/simp-lee/gobase/internal/domain"
+	"github.com/simp-lee/pagination"
 	"gorm.io/gorm"
 )
 
@@ -28,6 +29,11 @@ var reservedParams = map[string]bool{
 
 // validFieldName matches only alphanumeric characters and underscores.
 var validFieldName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// likeEscaper escapes special SQL LIKE characters so user-supplied values
+// are treated as literals. strings.NewReplacer performs a single-pass scan,
+// so no double-escaping can occur regardless of pair order.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // ParsePageRequest extracts pagination, sorting, and filtering parameters from query params.
 func ParsePageRequest(c *gin.Context) domain.PageRequest {
@@ -108,15 +114,16 @@ func Filter(req domain.PageRequest, allowed []string) func(db *gorm.DB) *gorm.DB
 	return func(db *gorm.DB) *gorm.DB {
 		for key, value := range req.Filter {
 			// Check for __like suffix.
-			if strings.HasSuffix(key, "__like") {
-				field := strings.TrimSuffix(key, "__like")
+			if before, ok := strings.CutSuffix(key, "__like"); ok {
+				field := before
 				if !validFieldName.MatchString(field) {
 					continue
 				}
 				if !isAllowed(field, allowed) {
 					continue
 				}
-				db = db.Where(field+" LIKE ?", "%"+value+"%")
+				escaped := likeEscaper.Replace(value)
+				db = db.Where(field+" LIKE ? ESCAPE '\\'", "%"+escaped+"%")
 			} else {
 				if !validFieldName.MatchString(key) {
 					continue
@@ -131,27 +138,41 @@ func Filter(req domain.PageRequest, allowed []string) func(db *gorm.DB) *gorm.DB
 	}
 }
 
-// NewPageResult creates a PageResult with computed TotalPages.
-func NewPageResult[T any](items []T, total int64, req domain.PageRequest) *domain.PageResult[T] {
-	totalPages := 0
-	if req.PageSize > 0 {
-		totalPages = int(math.Ceil(float64(total) / float64(req.PageSize)))
-	}
-
-	if items == nil {
-		items = []T{}
-	}
-
-	return &domain.PageResult[T]{
-		Items:      items,
-		Total:      total,
-		Page:       req.Page,
-		PageSize:   req.PageSize,
-		TotalPages: totalPages,
-	}
-}
-
 // isAllowed checks if a field name is in the allowed list.
 func isAllowed(field string, allowed []string) bool {
 	return slices.Contains(allowed, field)
+}
+
+// ListOptions configures which fields are allowed for sorting and filtering
+// in PaginateGORM.
+type ListOptions struct {
+	SortFields   []string
+	FilterFields []string
+}
+
+// PaginateGORM executes a paginated GORM query using the simp-lee/pagination library.
+// It applies filtering, sorting, and offset/limit via the existing scope helpers,
+// and returns a fully populated Pagination result.
+func PaginateGORM[T any](ctx context.Context, db *gorm.DB, req domain.PageRequest, opts ListOptions) (*pagination.Pagination[T], error) {
+	// Apply filter scope to the base query.
+	filtered := db.Scopes(Filter(req, opts.FilterFields))
+
+	paginator := pagination.NewPaginator[T](
+		pagination.WithItemsPerPage[T](req.PageSize),
+		pagination.WithItemTotalCallback[T](func(ctx context.Context) (int64, error) {
+			var count int64
+			err := filtered.Session(&gorm.Session{}).WithContext(ctx).Count(&count).Error
+			return count, err
+		}),
+		pagination.WithSliceCallback[T](func(ctx context.Context, offset, limit int) ([]T, error) {
+			var items []T
+			err := filtered.Session(&gorm.Session{}).WithContext(ctx).
+				Scopes(Sort(req, opts.SortFields)).
+				Offset(offset).Limit(limit).
+				Find(&items).Error
+			return items, err
+		}),
+	)
+
+	return paginator.Paginate(ctx, req.Page)
 }

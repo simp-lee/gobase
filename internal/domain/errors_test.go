@@ -73,6 +73,8 @@ func TestPredefinedErrors(t *testing.T) {
 		{"ErrAlreadyExists", ErrAlreadyExists, IsAlreadyExists, CodeAlreadyExists},
 		{"ErrValidation", ErrValidation, IsValidation, CodeValidation},
 		{"ErrInternal", ErrInternal, IsInternal, CodeInternal},
+		{"ErrUnauthorized", ErrUnauthorized, IsUnauthorized, CodeUnauthorized},
+		{"ErrForbidden", ErrForbidden, IsForbidden, CodeForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -114,6 +116,12 @@ func TestIsCheckers_NonAppError(t *testing.T) {
 	if IsInternal(plainErr) {
 		t.Error("IsInternal should return false for non-AppError")
 	}
+	if IsUnauthorized(plainErr) {
+		t.Error("IsUnauthorized should return false for non-AppError")
+	}
+	if IsForbidden(plainErr) {
+		t.Error("IsForbidden should return false for non-AppError")
+	}
 }
 
 func TestHTTPStatusCode(t *testing.T) {
@@ -126,6 +134,8 @@ func TestHTTPStatusCode(t *testing.T) {
 		{"already exists", ErrAlreadyExists, http.StatusConflict},
 		{"validation", ErrValidation, http.StatusBadRequest},
 		{"internal", ErrInternal, http.StatusInternalServerError},
+		{"unauthorized", ErrUnauthorized, http.StatusUnauthorized},
+		{"forbidden", ErrForbidden, http.StatusForbidden},
 		{"custom not found", NewAppError(CodeNotFound, "custom", nil), http.StatusNotFound},
 		{"unknown code", NewAppError(999, "unknown", nil), http.StatusInternalServerError},
 		{"non-AppError", errors.New("plain"), http.StatusInternalServerError},

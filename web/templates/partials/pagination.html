@@ -1,17 +1,10 @@
 {{ define "pagination" }}
-{{ if gt .TotalPages 1 }}
+{{ if gt .Pagination.TotalPages 1 }}
 <nav aria-label="分页导航" class="flex items-center justify-center mt-8 space-x-1">
     {{/* Previous button */}}
-    {{ if eq .Page 1 }}
-    <span class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-400 bg-gray-100 rounded-lg cursor-not-allowed select-none">
-        <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
-        </svg>
-        上一页
-    </span>
-    {{ else }}
-    <a href="{{ .BaseURL }}?page={{ sub .Page 1 }}&page_size={{ .PageSize }}"
-       hx-get="{{ .BaseURL }}?page={{ sub .Page 1 }}&page_size={{ .PageSize }}"
+    {{ if .Pagination.HasPreviousPage }}
+    <a href="{{ .BaseURL }}?page={{ .Pagination.PreviousPage }}&page_size={{ .Pagination.ItemsPerPage }}"
+       hx-get="{{ .BaseURL }}?page={{ .Pagination.PreviousPage }}&page_size={{ .Pagination.ItemsPerPage }}"
        hx-target="#content"
        hx-swap="innerHTML"
        class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-indigo-600 transition-colors duration-200">
@@ -20,39 +13,35 @@
         </svg>
         上一页
     </a>
+    {{ else }}
+    <span class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-400 bg-gray-100 rounded-lg cursor-not-allowed select-none">
+        <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+        </svg>
+        上一页
+    </span>
     {{ end }}
 
-    {{/* Compute visible page window: up to 5 pages around current */}}
-    {{ $page := .Page }}
-    {{ $totalPages := .TotalPages }}
-    {{ $pageSize := .PageSize }}
-    {{ $baseURL := .BaseURL }}
-
-    {{/* Window boundaries */}}
-    {{ $start := sub $page 2 }}
-    {{ if lt $start 1 }}{{ $start = 1 }}{{ end }}
-    {{ $end := add $start 4 }}
-    {{ if gt $end $totalPages }}{{ $end = $totalPages }}{{ end }}
-    {{ $start = sub $end 4 }}
-    {{ if lt $start 1 }}{{ $start = 1 }}{{ end }}
-
     {{/* Leading ellipsis */}}
-    {{ if gt $start 1 }}
-    <a href="{{ $baseURL }}?page=1&page_size={{ $pageSize }}"
-       hx-get="{{ $baseURL }}?page=1&page_size={{ $pageSize }}"
+    {{ if gt .Pagination.FirstPageInRange .Pagination.FirstPage }}
+    <a href="{{ .BaseURL }}?page={{ .Pagination.FirstPage }}&page_size={{ .Pagination.ItemsPerPage }}"
+       hx-get="{{ .BaseURL }}?page={{ .Pagination.FirstPage }}&page_size={{ .Pagination.ItemsPerPage }}"
        hx-target="#content"
        hx-swap="innerHTML"
        class="inline-flex items-center justify-center w-10 h-10 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-indigo-600 transition-colors duration-200">
-        1
+        {{ .Pagination.FirstPage }}
     </a>
-    {{ if gt $start 2 }}
+    {{ if gt .Pagination.FirstPageInRange (add .Pagination.FirstPage 1) }}
     <span class="inline-flex items-center justify-center w-10 h-10 text-sm text-gray-400 select-none">&hellip;</span>
     {{ end }}
     {{ end }}
 
     {{/* Page number buttons */}}
-    {{ range $p := seq $start $end }}
-    {{ if eq $p $page }}
+    {{ $currentPage := .Pagination.CurrentPage }}
+    {{ $baseURL := .BaseURL }}
+    {{ $pageSize := .Pagination.ItemsPerPage }}
+    {{ range $p := .Pagination.Pages }}
+    {{ if eq $p $currentPage }}
     <span class="inline-flex items-center justify-center w-10 h-10 text-sm font-bold text-white bg-indigo-600 rounded-lg shadow-sm select-none">
         {{ $p }}
     </span>
@@ -68,30 +57,23 @@
     {{ end }}
 
     {{/* Trailing ellipsis */}}
-    {{ if lt $end $totalPages }}
-    {{ if lt (add $end 1) $totalPages }}
+    {{ if lt .Pagination.LastPageInRange .Pagination.LastPage }}
+    {{ if lt (add .Pagination.LastPageInRange 1) .Pagination.LastPage }}
     <span class="inline-flex items-center justify-center w-10 h-10 text-sm text-gray-400 select-none">&hellip;</span>
     {{ end }}
-    <a href="{{ $baseURL }}?page={{ $totalPages }}&page_size={{ $pageSize }}"
-       hx-get="{{ $baseURL }}?page={{ $totalPages }}&page_size={{ $pageSize }}"
+    <a href="{{ .BaseURL }}?page={{ .Pagination.LastPage }}&page_size={{ .Pagination.ItemsPerPage }}"
+       hx-get="{{ .BaseURL }}?page={{ .Pagination.LastPage }}&page_size={{ .Pagination.ItemsPerPage }}"
        hx-target="#content"
        hx-swap="innerHTML"
        class="inline-flex items-center justify-center w-10 h-10 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-indigo-600 transition-colors duration-200">
-        {{ $totalPages }}
+        {{ .Pagination.LastPage }}
     </a>
     {{ end }}
 
     {{/* Next button */}}
-    {{ if eq .Page .TotalPages }}
-    <span class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-400 bg-gray-100 rounded-lg cursor-not-allowed select-none">
-        下一页
-        <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-        </svg>
-    </span>
-    {{ else }}
-    <a href="{{ .BaseURL }}?page={{ add .Page 1 }}&page_size={{ .PageSize }}"
-       hx-get="{{ .BaseURL }}?page={{ add .Page 1 }}&page_size={{ .PageSize }}"
+    {{ if .Pagination.HasNextPage }}
+    <a href="{{ .BaseURL }}?page={{ .Pagination.NextPage }}&page_size={{ .Pagination.ItemsPerPage }}"
+       hx-get="{{ .BaseURL }}?page={{ .Pagination.NextPage }}&page_size={{ .Pagination.ItemsPerPage }}"
        hx-target="#content"
        hx-swap="innerHTML"
        class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-indigo-600 transition-colors duration-200">
@@ -100,6 +82,13 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
         </svg>
     </a>
+    {{ else }}
+    <span class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-400 bg-gray-100 rounded-lg cursor-not-allowed select-none">
+        下一页
+        <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+        </svg>
+    </span>
     {{ end }}
 </nav>
 {{ end }}

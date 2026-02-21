@@ -14,6 +14,10 @@ import (
 	"github.com/simp-lee/gobase/internal/domain"
 )
 
+func init() {
+	gin.SetMode(gin.TestMode)
+}
+
 // testInput is used to generate real validator.ValidationErrors.
 type testInput struct {
 	Name  string `json:"name" validate:"required"`
@@ -181,7 +185,13 @@ func TestList(t *testing.T) {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
 	}
-	result := domain.PageResult[item]{
+	result := struct {
+		Items      []item `json:"items"`
+		Total      int64  `json:"total"`
+		Page       int    `json:"page"`
+		PageSize   int    `json:"page_size"`
+		TotalPages int    `json:"total_pages"`
+	}{
 		Items:      []item{{ID: 1, Name: "Alice"}, {ID: 2, Name: "Bob"}},
 		Total:      2,
 		Page:       1,
@@ -210,7 +220,13 @@ func TestList(t *testing.T) {
 
 	// Verify nested structure by re-marshaling data.
 	dataBytes, _ := json.Marshal(resp.Data)
-	var pageResult domain.PageResult[item]
+	var pageResult struct {
+		Items      []item `json:"items"`
+		Total      int64  `json:"total"`
+		Page       int    `json:"page"`
+		PageSize   int    `json:"page_size"`
+		TotalPages int    `json:"total_pages"`
+	}
 	if err := json.Unmarshal(dataBytes, &pageResult); err != nil {
 		t.Fatalf("failed to unmarshal page result: %v", err)
 	}
@@ -249,14 +265,14 @@ func TestValidationError_WithValidatorErrors(t *testing.T) {
 	// Without obj, ValidationError falls back to lowercased struct field names.
 	if msg, ok := resp.Errors["name"]; !ok {
 		t.Error("expected error for field 'name'")
-	} else if msg != "required" {
-		t.Errorf("expected error tag 'required' for name, got %q", msg)
+	} else if msg != "This field is required" {
+		t.Errorf("expected message %q for name, got %q", "This field is required", msg)
 	}
 
 	if msg, ok := resp.Errors["email"]; !ok {
 		t.Error("expected error for field 'email'")
-	} else if msg != "required" {
-		t.Errorf("expected error tag 'required' for email, got %q", msg)
+	} else if msg != "This field is required" {
+		t.Errorf("expected message %q for email, got %q", "This field is required", msg)
 	}
 }
 
@@ -276,8 +292,8 @@ func TestValidationError_NonValidationError(t *testing.T) {
 	if resp.Code != http.StatusBadRequest {
 		t.Errorf("expected code %d, got %d", http.StatusBadRequest, resp.Code)
 	}
-	if resp.Message != "bad json" {
-		t.Errorf("expected message %q, got %q", "bad json", resp.Message)
+	if resp.Message != "bad request" {
+		t.Errorf("expected message %q, got %q", "bad request", resp.Message)
 	}
 }
 
@@ -298,6 +314,14 @@ func TestBindAndValidate_InvalidJSON(t *testing.T) {
 	}
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp Response
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Message != "bad request" {
+		t.Errorf("expected message %q, got %q", "bad request", resp.Message)
 	}
 }
 
@@ -364,13 +388,42 @@ func TestBindAndValidate_InvalidEmail(t *testing.T) {
 
 	if msg, ok := resp.Errors["email"]; !ok {
 		t.Error("expected error for field 'email'")
-	} else if msg != "email" {
-		t.Errorf("expected error tag 'email' for email field, got %q", msg)
+	} else if msg != "Must be a valid email address" {
+		t.Errorf("expected message %q for email field, got %q", "Must be a valid email address", msg)
 	}
 
 	// name should NOT be in errors since it's valid.
 	if _, ok := resp.Errors["name"]; ok {
 		t.Error("did not expect error for field 'name'")
+	}
+}
+
+func TestBindAndValidate_MinLength(t *testing.T) {
+	c, w := newResponseTestContextWithBody(`{"name":"Al"}`)
+
+	type bindInput struct {
+		Name string `json:"name" binding:"required,min=3"`
+	}
+
+	var input bindInput
+	ok := BindAndValidate(c, &input)
+
+	if ok {
+		t.Error("expected BindAndValidate to return false for too-short name")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp ValidationErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if msg, ok := resp.Errors["name"]; !ok {
+		t.Error("expected error for field 'name'")
+	} else if msg != "Must be at least 3 characters" {
+		t.Errorf("expected message %q for name field, got %q", "Must be at least 3 characters", msg)
 	}
 }
 

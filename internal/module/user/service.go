@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/simp-lee/gobase/internal/domain"
+	"github.com/simp-lee/pagination"
 )
 
 // userService implements domain.UserService.
@@ -46,7 +47,7 @@ func (s *userService) GetUser(ctx context.Context, id uint) (*domain.User, error
 }
 
 // ListUsers returns a paginated list of users.
-func (s *userService) ListUsers(ctx context.Context, req domain.PageRequest) (*domain.PageResult[domain.User], error) {
+func (s *userService) ListUsers(ctx context.Context, req domain.PageRequest) (*pagination.Pagination[domain.User], error) {
 	return s.repo.List(ctx, req)
 }
 

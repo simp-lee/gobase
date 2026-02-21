@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/simp-lee/pagination"
+
 	"github.com/simp-lee/gobase/internal/domain"
 )
 
@@ -41,16 +43,26 @@ func (m *mockUserRepo) GetByID(_ context.Context, id uint) (*domain.User, error)
 	return u, nil
 }
 
-func (m *mockUserRepo) List(_ context.Context, req domain.PageRequest) (*domain.PageResult[domain.User], error) {
+func (m *mockUserRepo) GetByEmail(_ context.Context, email string) (*domain.User, error) {
+	for _, u := range m.users {
+		if u.Email == email {
+			return u, nil
+		}
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (m *mockUserRepo) List(_ context.Context, req domain.PageRequest) (*pagination.Pagination[domain.User], error) {
 	items := make([]domain.User, 0, len(m.users))
 	for _, u := range m.users {
 		items = append(items, *u)
 	}
-	return &domain.PageResult[domain.User]{
-		Items:    items,
-		Total:    int64(len(items)),
-		Page:     req.Page,
-		PageSize: req.PageSize,
+	return &pagination.Pagination[domain.User]{
+		Items:        items,
+		TotalItems:   int64(len(items)),
+		CurrentPage:  req.Page,
+		ItemsPerPage: req.PageSize,
+		TotalPages:   1,
 	}, nil
 }
 
@@ -171,8 +183,8 @@ func TestListUsers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if result.Total != 2 {
-			t.Errorf("total = %d; want 2", result.Total)
+		if result.TotalItems != 2 {
+			t.Errorf("total = %d; want 2", result.TotalItems)
 		}
 		if len(result.Items) != 2 {
 			t.Errorf("items count = %d; want 2", len(result.Items))
@@ -187,8 +199,8 @@ func TestListUsers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if result.Total != 0 {
-			t.Errorf("total = %d; want 0", result.Total)
+		if result.TotalItems != 0 {
+			t.Errorf("total = %d; want 0", result.TotalItems)
 		}
 		if len(result.Items) != 0 {
 			t.Errorf("items count = %d; want 0", len(result.Items))
@@ -205,11 +217,11 @@ func TestListUsers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if result.Page != 3 {
-			t.Errorf("page = %d; want 3", result.Page)
+		if result.CurrentPage != 3 {
+			t.Errorf("page = %d; want 3", result.CurrentPage)
 		}
-		if result.PageSize != 25 {
-			t.Errorf("pageSize = %d; want 25", result.PageSize)
+		if result.ItemsPerPage != 25 {
+			t.Errorf("pageSize = %d; want 25", result.ItemsPerPage)
 		}
 	})
 }

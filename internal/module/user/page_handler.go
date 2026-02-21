@@ -15,15 +15,6 @@ import (
 	"github.com/simp-lee/gobase/internal/pkg"
 )
 
-// PaginationData holds the fields required by the pagination partial template.
-type PaginationData struct {
-	Page       int    `json:"page"`
-	TotalPages int    `json:"total_pages"`
-	PageSize   int    `json:"page_size"`
-	Total      int64  `json:"total"`
-	BaseURL    string `json:"base_url"`
-}
-
 // UserPageHandler handles page rendering and htmx endpoints for the user module.
 type UserPageHandler struct {
 	svc domain.UserService
@@ -46,15 +37,10 @@ func (h *UserPageHandler) ListPage(c *gin.Context) {
 	}
 
 	c.HTML(http.StatusOK, "user/list.html", gin.H{
-		"Users": result.Items,
-		"Pagination": PaginationData{
-			Page:       result.Page,
-			TotalPages: result.TotalPages,
-			PageSize:   result.PageSize,
-			Total:      result.Total,
-			BaseURL:    "/users",
-		},
-		"CSRFToken": middleware.GetCSRFToken(c),
+		"Users":      result.Items,
+		"Pagination": result,
+		"BaseURL":    "/users",
+		"CSRFToken":  middleware.GetCSRFToken(c),
 	})
 }
 
@@ -72,7 +58,7 @@ func (h *UserPageHandler) NewPage(c *gin.Context) {
 func (h *UserPageHandler) EditPage(c *gin.Context) {
 	id, err := parseID(c)
 	if err != nil {
-		c.HTML(http.StatusBadRequest, "errors/404.html", gin.H{})
+		c.HTML(http.StatusBadRequest, "errors/400.html", gin.H{})
 		return
 	}
 
@@ -127,7 +113,7 @@ func (h *UserPageHandler) CreateHTMX(c *gin.Context) {
 func (h *UserPageHandler) UpdateHTMX(c *gin.Context) {
 	id, err := parseID(c)
 	if err != nil {
-		c.HTML(http.StatusBadRequest, "errors/404.html", gin.H{})
+		c.HTML(http.StatusBadRequest, "errors/400.html", gin.H{})
 		return
 	}
 
@@ -136,7 +122,11 @@ func (h *UserPageHandler) UpdateHTMX(c *gin.Context) {
 		slog.Debug("update user: bind error", "error", err, "id", id)
 		user, getErr := h.svc.GetUser(c.Request.Context(), id)
 		if getErr != nil {
-			c.HTML(http.StatusNotFound, "errors/404.html", gin.H{})
+			if domain.IsNotFound(getErr) {
+				c.HTML(http.StatusNotFound, "errors/404.html", gin.H{})
+				return
+			}
+			c.HTML(http.StatusInternalServerError, "errors/500.html", gin.H{})
 			return
 		}
 		c.HTML(http.StatusOK, "user/form.html", gin.H{
@@ -152,7 +142,11 @@ func (h *UserPageHandler) UpdateHTMX(c *gin.Context) {
 	if err != nil {
 		user, getErr := h.svc.GetUser(c.Request.Context(), id)
 		if getErr != nil {
-			c.HTML(http.StatusNotFound, "errors/404.html", gin.H{})
+			if domain.IsNotFound(getErr) {
+				c.HTML(http.StatusNotFound, "errors/404.html", gin.H{})
+				return
+			}
+			c.HTML(http.StatusInternalServerError, "errors/500.html", gin.H{})
 			return
 		}
 		c.HTML(http.StatusOK, "user/form.html", gin.H{
@@ -200,8 +194,11 @@ func (h *UserPageHandler) DeleteHTMX(c *gin.Context) {
 // parseID extracts and validates the "id" URL parameter.
 func parseID(c *gin.Context) (uint, error) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, strconv.IntSize)
+	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil || id == 0 {
+		return 0, fmt.Errorf("invalid id: %s", idStr)
+	}
+	if id > uint64(^uint(0)) {
 		return 0, fmt.Errorf("invalid id: %s", idStr)
 	}
 	return uint(id), nil

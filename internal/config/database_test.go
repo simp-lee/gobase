@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -108,6 +109,30 @@ func TestSetupDatabase_InvalidConnMaxLifetime(t *testing.T) {
 	}
 }
 
+func TestSetupDatabase_NonPositiveConnMaxLifetime(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	cfg := &DatabaseConfig{
+		Driver: "sqlite",
+		SQLite: SQLiteConfig{Path: dbPath},
+		Pool: PoolConfig{
+			MaxIdleConns:    5,
+			MaxOpenConns:    50,
+			ConnMaxLifetime: "-1s",
+		},
+	}
+
+	_, err := SetupDatabase(cfg, logger)
+	if err == nil {
+		t.Fatal("SetupDatabase() expected error for non-positive duration, got nil")
+	}
+	if !strings.Contains(err.Error(), "pool.conn_max_lifetime") {
+		t.Fatalf("SetupDatabase() error = %v, want contains %q", err, "pool.conn_max_lifetime")
+	}
+}
+
 func TestSetupDatabase_DebugLogMode(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -157,6 +182,9 @@ func TestEffectiveDefaults(t *testing.T) {
 	}
 	if got := effectiveConnMaxLifetime(""); got != "1h" {
 		t.Errorf("effectiveConnMaxLifetime(\"\") = %q; want \"1h\"", got)
+	}
+	if got := effectiveConnMaxLifetime("   "); got != "1h" {
+		t.Errorf("effectiveConnMaxLifetime(\"   \") = %q; want \"1h\"", got)
 	}
 	if got := effectiveConnMaxLifetime("30m"); got != "30m" {
 		t.Errorf("effectiveConnMaxLifetime(\"30m\") = %q; want \"30m\"", got)

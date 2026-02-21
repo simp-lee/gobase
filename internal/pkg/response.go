@@ -2,6 +2,8 @@ package pkg
 
 import (
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"strings"
@@ -83,15 +85,46 @@ func BindAndValidate(c *gin.Context, obj any) bool {
 	return true
 }
 
+// validationMessages maps validator tags to human-readable English messages.
+var validationMessages = map[string]string{
+	"required": "This field is required",
+	"email":    "Must be a valid email address",
+	"min":      "Must be at least %s characters",
+	"max":      "Must be at most %s characters",
+	"len":      "Must be exactly %s characters",
+	"url":      "Must be a valid URL",
+	"uuid":     "Must be a valid UUID",
+	"oneof":    "Must be one of: %s",
+}
+
+// friendlyMessage returns a human-readable message for a validation field error.
+// It looks up the tag in validationMessages and substitutes the parameter when
+// the template contains %s. If no mapping exists it falls back to tag=param.
+func friendlyMessage(fe validator.FieldError) string {
+	tag := fe.Tag()
+	param := fe.Param()
+	if tmpl, ok := validationMessages[tag]; ok {
+		if strings.Contains(tmpl, "%s") && param != "" {
+			return fmt.Sprintf(tmpl, param)
+		}
+		return tmpl
+	}
+	if param != "" {
+		return tag + "=" + param
+	}
+	return tag
+}
+
 // validationErrorWithType sends a 400 validation error response.
 // When obj is non-nil, it reflects on the struct to prefer JSON tag names.
 func validationErrorWithType(c *gin.Context, err error, obj any) {
 	var ve validator.ValidationErrors
 	if !errors.As(err, &ve) {
 		// Not a validation error; send a generic bad request.
+		slog.Warn("request validation failed", slog.Any("error", err))
 		c.JSON(http.StatusBadRequest, Response{
 			Code:    http.StatusBadRequest,
-			Message: err.Error(),
+			Message: "bad request",
 			Data:    nil,
 		})
 		return
@@ -108,11 +141,7 @@ func validationErrorWithType(c *gin.Context, err error, obj any) {
 		} else {
 			name = strings.ToLower(name)
 		}
-		msg := fe.Tag()
-		if fe.Param() != "" {
-			msg += "=" + fe.Param()
-		}
-		fieldErrors[name] = msg
+		fieldErrors[name] = friendlyMessage(fe)
 	}
 
 	c.JSON(http.StatusBadRequest, ValidationErrorResponse{

@@ -1,0 +1,19 @@
+{{ template "base" . }}
+
+{{ define "title" }}请求错误 - GoBase{{ end }}
+
+{{ define "content" }}
+<div class="flex items-center justify-center min-h-[60vh]">
+    <div class="text-center">
+        <p class="text-9xl font-extrabold text-indigo-500 tracking-widest">400</p>
+        <h1 class="mt-4 text-3xl font-bold text-gray-800">⚠️ 请求参数错误</h1>
+        <p class="mt-3 text-lg text-gray-500">请求无效，请检查后重试。</p>
+        <div class="mt-8">
+            <a href="/"
+               class="inline-block rounded-lg bg-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 transition-colors duration-200">
+                ← 返回首页
+            </a>
+        </div>
+    </div>
+</div>
+{{ end }}

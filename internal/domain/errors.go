@@ -11,6 +11,8 @@ const (
 	CodeAlreadyExists = 2
 	CodeValidation    = 3
 	CodeInternal      = 4
+	CodeUnauthorized  = 5
+	CodeForbidden     = 6
 )
 
 // AppError represents a business logic error with a code, message, and optional wrapped error.
@@ -47,6 +49,8 @@ var (
 	ErrAlreadyExists = &AppError{Code: CodeAlreadyExists, Message: "already exists"}
 	ErrValidation    = &AppError{Code: CodeValidation, Message: "validation error"}
 	ErrInternal      = &AppError{Code: CodeInternal, Message: "internal error"}
+	ErrUnauthorized  = &AppError{Code: CodeUnauthorized, Message: "unauthorized"}
+	ErrForbidden     = &AppError{Code: CodeForbidden, Message: "forbidden"}
 )
 
 // NewAppError creates a new AppError with the given code, message, and wrapped error.
@@ -78,6 +82,16 @@ func IsInternal(err error) bool {
 	return hasCode(err, CodeInternal)
 }
 
+// IsUnauthorized reports whether err is or wraps an AppError with CodeUnauthorized.
+func IsUnauthorized(err error) bool {
+	return hasCode(err, CodeUnauthorized)
+}
+
+// IsForbidden reports whether err is or wraps an AppError with CodeForbidden.
+func IsForbidden(err error) bool {
+	return hasCode(err, CodeForbidden)
+}
+
 // hasCode checks whether err is or wraps an *AppError with the given code.
 func hasCode(err error, code int) bool {
 	var appErr *AppError
@@ -101,6 +115,10 @@ func HTTPStatusCode(err error) int {
 			return http.StatusBadRequest
 		case CodeInternal:
 			return http.StatusInternalServerError
+		case CodeUnauthorized:
+			return http.StatusUnauthorized
+		case CodeForbidden:
+			return http.StatusForbidden
 		}
 	}
 	return http.StatusInternalServerError

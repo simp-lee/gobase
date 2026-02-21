@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"math/bits"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/simp-lee/pagination"
 
 	"github.com/simp-lee/gobase/internal/domain"
 )
@@ -58,7 +61,7 @@ func (m *mockUserService) GetUser(_ context.Context, id uint) (*domain.User, err
 	return u, nil
 }
 
-func (m *mockUserService) ListUsers(_ context.Context, req domain.PageRequest) (*domain.PageResult[domain.User], error) {
+func (m *mockUserService) ListUsers(_ context.Context, req domain.PageRequest) (*pagination.Pagination[domain.User], error) {
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
@@ -66,12 +69,12 @@ func (m *mockUserService) ListUsers(_ context.Context, req domain.PageRequest) (
 	for _, u := range m.users {
 		items = append(items, *u)
 	}
-	return &domain.PageResult[domain.User]{
-		Items:      items,
-		Total:      int64(len(items)),
-		Page:       req.Page,
-		PageSize:   req.PageSize,
-		TotalPages: 1,
+	return &pagination.Pagination[domain.User]{
+		Items:        items,
+		TotalItems:   int64(len(items)),
+		CurrentPage:  req.Page,
+		ItemsPerPage: req.PageSize,
+		TotalPages:   1,
 	}, nil
 }
 
@@ -110,8 +113,9 @@ func setupTestRouter(h *UserPageHandler) *gin.Engine {
 
 	// Stub templates so c.HTML() calls don't panic.
 	tmpl := template.Must(template.New("").Parse(
-		`{{define "user/list.html"}}list{{end}}` +
+		`{{define "user/list.html"}}list:BaseURL={{.BaseURL}}:HasPagination={{if .Pagination}}yes{{else}}no{{end}}{{end}}` +
 			`{{define "user/form.html"}}form{{if .Error}}:{{.Error}}{{end}}{{end}}` +
+			`{{define "errors/400.html"}}400{{end}}` +
 			`{{define "errors/404.html"}}404{{end}}` +
 			`{{define "errors/500.html"}}500{{end}}`,
 	))
@@ -138,6 +142,50 @@ func TestNewUserPageHandler(t *testing.T) {
 	}
 	if h.svc != svc {
 		t.Fatal("expected handler to hold the given service")
+	}
+}
+
+func TestListPage_Success(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Alice", Email: "alice@example.com"}
+	svc.users[2] = &domain.User{BaseModel: domain.BaseModel{ID: 2}, Name: "Bob", Email: "bob@example.com"}
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	// Verify Pagination object is passed to template.
+	if !strings.Contains(body, "HasPagination=yes") {
+		t.Errorf("expected template data to include Pagination, got %q", body)
+	}
+	// Verify BaseURL is passed to template.
+	if !strings.Contains(body, "BaseURL=/users") {
+		t.Errorf("expected template data to include BaseURL=/users, got %q", body)
+	}
+}
+
+func TestListPage_ServiceError(t *testing.T) {
+	svc := newMockService()
+	svc.listErr = errors.New("db connection lost")
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "500") {
+		t.Errorf("expected 500 error template body, got %q", w.Body.String())
 	}
 }
 
@@ -349,6 +397,69 @@ func TestUpdateHTMX_InvalidID(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", w.Code)
 	}
+	if !strings.Contains(w.Body.String(), "400") {
+		t.Fatalf("expected 400 template body, got %q", w.Body.String())
+	}
+}
+
+func TestEditPage_InvalidID(t *testing.T) {
+	svc := newMockService()
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users/abc/edit", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "400") {
+		t.Fatalf("expected 400 template body, got %q", w.Body.String())
+	}
+}
+
+func TestUpdateHTMX_BindError_GetUserInternalError(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Old", Email: "old@example.com"}
+	svc.getErr = errors.New("db connection lost")
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	form := url.Values{}
+	form.Set("name", "A")
+	form.Set("email", "not-an-email")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPut, "/users/1", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", w.Code)
+	}
+}
+
+func TestUpdateHTMX_UpdateError_GetUserInternalError(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Old", Email: "old@example.com"}
+	svc.updateErr = errors.New("update failed")
+	svc.getErr = errors.New("db connection lost")
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	form := url.Values{}
+	form.Set("name", "Updated")
+	form.Set("email", "updated@example.com")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPut, "/users/1", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", w.Code)
+	}
 }
 
 func TestDeleteHTMX_Success(t *testing.T) {
@@ -500,6 +611,8 @@ func TestParseID(t *testing.T) {
 		{"negative", "-1", 0, true},
 		{"non-numeric", "abc", 0, true},
 		{"empty", "", 0, true},
+		{"max-uint", strconv.FormatUint(uint64(^uint(0)), 10), uint(^uint(0)), false},
+		{"overflow-uint64", "18446744073709551616", 0, true},
 	}
 
 	for _, tt := range tests {
@@ -516,6 +629,34 @@ func TestParseID(t *testing.T) {
 			}
 			if id != tt.wantID {
 				t.Errorf("parseID() = %v, want %v", id, tt.wantID)
+			}
+		})
+	}
+}
+
+func TestParseID_ArchitectureBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		param   string
+		wantErr bool
+	}{
+		{
+			name:    "over-uint32-boundary",
+			param:   "4294967296",
+			wantErr: bits.UintSize == 32,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Params = gin.Params{{Key: "id", Value: tt.param}}
+
+			_, err := parseID(c)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseID() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}

@@ -33,7 +33,7 @@ GoBase 是一套**轻量、AI 编程友好**的 Go Web 开发框架 Starter Kit�
 
 ### 前置要求
 
-- Go 1.23+
+- Go 1.25+
 - Make（Windows 推荐 MinGW Make 或 Git Bash）
 - curl（用于下载前端资源）
 
@@ -63,6 +63,7 @@ make run              # 以默认配置运行
 make test             # 运行全部测试
 make lint             # 运行 golangci-lint
 make clean            # 清理构建产物
+make seed             # 插入示例数据到数据库
 ```
 
 ## 目录结构
@@ -70,6 +71,8 @@ make clean            # 清理构建产物
 ```
 gobase/
 ├── cmd/
+│   ├── seed/
+│   │   └── main.go              # Seed data 入口：插入示例数据
 │   └── server/
 │       └── main.go              # 程序入口：加载配置 → 构建 App → 启动服务
 ├── configs/
@@ -78,7 +81,9 @@ gobase/
 ├── internal/
 │   ├── app/
 │   │   ├── app.go               # 应用核心：依赖组装、生命周期管理、优雅关停
-│   │   ├── routes.go            # 路由注册：静态资源、健康检查、API、页面路由
+│   │   ├── errors.go            # 共享错误响应工具（Accept-based HTML/JSON 分流）
+│   │   ├── module.go            # Module 接口定义（自注册路由）
+│   │   ├── routes.go            # 路由注册：Module 循环注册、静态资源、健康检查
 │   │   └── template.go          # 模板渲染器：layout/partial 组合，debug 热加载
 │   ├── config/
 │   │   ├── config.go            # 配置结构体定义、YAML 加载、环境变量覆盖
@@ -88,16 +93,14 @@ gobase/
 │   │   ├── model.go             # BaseModel（ID + CreatedAt + UpdatedAt）、PageRequest、PageResult[T]
 │   │   ├── errors.go            # 业务错误码体系：AppError、错误判断辅助函数
 │   │   └── user.go              # User 实体 + UserRepository / UserService 接口
-│   ├── middleware/
-│   │   ├── cors.go              # CORS 跨域中间件
+│   ├── middleware/               # 注：CORS / Logger / Recovery / RequestID 已迁移至 ginx 库
 │   │   ├── csrf.go              # CSRF 防护中间件（HMAC-SHA256）
-│   │   ├── logger.go            # 请求日志中间件（slog）
-│   │   ├── recovery.go          # Panic 恢复中间件（含 500 错误页）
-│   │   └── requestid.go         # Request ID 注入中间件
+│   │   └── csrf_test.go         # CSRF 中间件测试
 │   ├── module/
 │   │   └── user/                # ★ 示例模块 — 完整 CRUD
 │   │       ├── dto.go           # 请求 DTO（CreateUserRequest / UpdateUserRequest）
-│   │       ├── handler.go       # REST API Handler（/api/users）
+│   │       ├── handler.go       # REST API Handler（/api/v1/users）
+│   │       ├── module.go        # UserModule — Module 接口实现，注册路由
 │   │       ├── page_handler.go  # 页面 Handler（htmx 表单交互）
 │   │       ├── repository.go    # GORM 数据访问实现
 │   │       └── service.go       # 业务逻辑实现
@@ -118,6 +121,13 @@ gobase/
 │       ├── errors/              # 错误页面（404、500）
 │       ├── home.html            # 首页
 │       └── user/                # User 模块页面（列表、表单）
+├── .agents/
+│   └── skills/                  # AI Agent 技能文档
+│       ├── gobase-architecture/     # 项目架构概览
+│       ├── gobase-new-module/       # 新增模块指南
+│       ├── gobase-ginx-patterns/    # ginx 使用模式
+│       ├── gobase-auth-extension/   # Auth/RBAC 扩展指引
+│       └── gobase-ratelimit-advanced/ # 高级限流扩展指引
 ├── go.mod
 ├── Makefile                     # 构建、运行、测试、前端资源下载
 └── README.md
@@ -199,11 +209,43 @@ type UpdateProductRequest struct {
 
 参照 `internal/module/user/` 中的代码结构。Repository 中使用 `pkg.Paginate`、`pkg.Sort`、`pkg.Filter` 实现分页查询。
 
-### 5. 注册到路由（`internal/app/routes.go`）
+### 5. 创建 Module（`internal/module/product/module.go`）
 
-在 `RouteDeps` 中添加新的 Handler，然后在 `RegisterRoutes` 中注册 API 和页面路由。
+```go
+package product
 
-### 6. 注册 AutoMigrate（`internal/app/app.go`）
+import "github.com/gin-gonic/gin"
+
+type ProductModule struct {
+    handler     *ProductHandler
+    pageHandler *ProductPageHandler
+}
+
+func NewModule(h *ProductHandler, ph *ProductPageHandler) *ProductModule {
+    return &ProductModule{handler: h, pageHandler: ph}
+}
+
+func (m *ProductModule) RegisterRoutes(api *gin.RouterGroup, pages *gin.RouterGroup) {
+    api.POST("/products", m.handler.Create)
+    api.GET("/products/:id", m.handler.Get)
+    api.GET("/products", m.handler.List)
+    api.PUT("/products/:id", m.handler.Update)
+    api.DELETE("/products/:id", m.handler.Delete)
+}
+```
+
+### 6. 注册到 App（`internal/app/app.go`）
+
+在 `New()` 函数的 DI 区段中构建 Module instance 并加入 `modules` 切片：
+
+```go
+productModule := product.NewModule(productHandler, productPageHandler)
+modules := []Module{userModule, productModule}
+```
+
+路由将通过 Module 循环自动注册到 `/api/v1` 路由组。
+
+### 7. 注册 AutoMigrate（`internal/app/app.go`）
 
 在 `New()` 函数的 AutoMigrate 调用中添加 `&domain.Product{}`。
 
@@ -213,12 +255,16 @@ type UpdateProductRequest struct {
 
 ```yaml
 server:
-  host: "0.0.0.0"
+  host: "127.0.0.1"
   port: 8080
   mode: "debug"                    # debug | release
-  csrf_secret: "change-me-to-a-random-secret"
+  csrf_secret: ""                        # required in release mode; use >=32 chars
   cors:
     allow_origins: []               # release 默认拒绝跨域；显式配置后才放行
+  cache:
+    enabled: false                   # 启用 HTTP 响应缓存
+    ttl: "5m"                        # 缓存条目生存时间
+    max_size: 1000                   # 最大缓存条目数
 
 database:
   driver: "sqlite"                 # sqlite | postgres
@@ -239,7 +285,10 @@ database:
 log:
   level: "debug"                   # debug | info | warn | error
   format: "text"                   # text | json
+
 ```
+
+如需局域网设备访问，可将 `host` 改为 `0.0.0.0`；请仅在可信网络中使用，避免在 `debug` 模式下对公网暴露服务。
 
 ### CORS 配置建议（开发 / 生产）
 
@@ -296,6 +345,32 @@ APP__SERVER__PORT=9090 APP__LOG__LEVEL=info go run ./cmd/server -config configs/
 
 > **提示**：SQLite 为嵌入式数据库，连接池参数对其影响较小；切换到 PostgreSQL 时应根据服务器资源合理调整。
 
+## 中间件链（ginx）
+
+GoBase 使用 [ginx](https://github.com/simp-lee/ginx) 库的 `Chain` API 组合中间件链，支持条件组合和响应定制：
+
+### 响应定制回调
+
+| 回调 | 说明 |
+|------|------|
+| `OnError` | `c.Error()` 兜底处理，返回 500（`pkg.Response` 格式） |
+| `WithTimeoutResponse` | 请求超时时返回自定义 408 响应（`pkg.Response` 格式） |
+| `WithRateLimitResponse` | 限流触发时返回自定义 429 响应（`pkg.Response` 格式） |
+
+### 条件组合器
+
+| 函数 | 说明 | 示例 |
+|------|------|------|
+| `PathHasPrefix(p)` | 路径前缀匹配 | `PathHasPrefix("/api/")` |
+| `PathIs(p)` | 路径精确匹配 | `PathIs("/health")` |
+| `MethodIs(m)` | HTTP 方法匹配 | `MethodIs("GET")` |
+| `And(a, b)` | 逻辑与组合 | `And(MethodIs("GET"), PathHasPrefix("/api/"))` |
+| `Not(f)` | 逻辑非 | `Not(PathIs("/health"))` |
+
+### Cache 中间件
+
+仅对 GET `/api/*` 请求启用 HTTP 响应缓存，通过 `And(MethodIs("GET"), PathHasPrefix("/api/"))` 条件组合实现。
+
 ## 分页 / 过滤 / 排序 API
 
 ### 请求参数
@@ -311,7 +386,7 @@ APP__SERVER__PORT=9090 APP__LOG__LEVEL=info go run ./cmd/server -config configs/
 ### 请求示例
 
 ```
-GET /api/users?page=1&page_size=10&sort=name:asc&name__like=张
+GET /api/v1/users?page=1&page_size=10&sort=name:asc&name__like=张
 ```
 
 ### 响应格式
@@ -554,6 +629,8 @@ GoBase 的设计目标之一是**对 AI 编程工具友好**。以下指南帮�
 - GORM 作为 ORM（不使用 gorm.Model，使用自定义 BaseModel）
 - 2 层架构：Handler → Service → Repository
 - 接口定义在 internal/domain/，实现在 internal/module/xxx/
+- 每个模块实现 Module 接口（RegisterRoutes），在 app.go 中注册
+- API 路由组前缀为 /api/v1
 - DTO 定义在模块的 dto.go 中，不放在 domain 层
 - 分页使用 domain.PageRequest + domain.PageResult[T]
 - 统一响应使用 pkg.Success() / pkg.Error() / pkg.List()
@@ -571,11 +648,24 @@ GoBase 的设计目标之一是**对 AI 编程工具友好**。以下指南帮�
 3. internal/module/product/repository.go — GORM 实现，支持分页/过滤/排序
 4. internal/module/product/service.go — 业务逻辑
 5. internal/module/product/handler.go — REST API Handler
+6. internal/module/product/module.go — ProductModule（实现 Module 接口，注册路由）
 
 Product 包含字段：Name (string), Price (float64), Category (string)
 排序允许：id, name, price, created_at
 过滤允许：name, category
 ```
+
+### Agent Skills
+
+项目提供了一组 Agent Skill 文档（`.agents/skills/`），为 AI 工具提供深度上下文参考：
+
+| Skill | 文件 | 说明 |
+|-------|------|------|
+| 项目架构概览 | `.agents/skills/gobase-architecture/` | 2 层架构、目录约定、依赖方向 |
+| 新增模块指南 | `.agents/skills/gobase-new-module/` | Module 接口、四层结构、路由注册 |
+| ginx 使用模式 | `.agents/skills/gobase-ginx-patterns/` | Chain API、条件组合器、响应定制 |
+| Auth/RBAC 扩展 | `.agents/skills/gobase-auth-extension/` | 认证/授权接入指引 |
+| 高级限流扩展 | `.agents/skills/gobase-ratelimit-advanced/` | 时间窗口限流、动态限额 |
 
 ### 关键设计决策（AI 须知）
 

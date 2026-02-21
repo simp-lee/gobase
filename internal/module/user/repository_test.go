@@ -56,6 +56,38 @@ func TestGetByID_NotFound(t *testing.T) {
 	}
 }
 
+func TestGetByEmail(t *testing.T) {
+	db := setupTestDB(t)
+	repo := NewUserRepository(db)
+	ctx := context.Background()
+
+	user := &domain.User{Name: "Alice", Email: "alice@example.com"}
+	if err := repo.Create(ctx, user); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := repo.GetByEmail(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("GetByEmail: %v", err)
+	}
+	if got.Name != "Alice" || got.Email != "alice@example.com" {
+		t.Errorf("got %+v; want Name=Alice, Email=alice@example.com", got)
+	}
+	if got.ID != user.ID {
+		t.Errorf("ID=%d; want %d", got.ID, user.ID)
+	}
+}
+
+func TestGetByEmail_NotFound(t *testing.T) {
+	db := setupTestDB(t)
+	repo := NewUserRepository(db)
+
+	_, err := repo.GetByEmail(context.Background(), "nobody@example.com")
+	if !domain.IsNotFound(err) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
 func TestCreate_DuplicateEmail(t *testing.T) {
 	db := setupTestDB(t)
 	repo := NewUserRepository(db)
@@ -148,8 +180,8 @@ func TestList_Basic(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 
-	if result.Total != 5 {
-		t.Errorf("Total=%d; want 5", result.Total)
+	if result.TotalItems != 5 {
+		t.Errorf("TotalItems=%d; want 5", result.TotalItems)
 	}
 	if len(result.Items) != 3 {
 		t.Errorf("Items count=%d; want 3", len(result.Items))
@@ -184,8 +216,8 @@ func TestList_Filter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if result.Total != 1 {
-		t.Errorf("Total=%d; want 1", result.Total)
+	if result.TotalItems != 1 {
+		t.Errorf("TotalItems=%d; want 1", result.TotalItems)
 	}
 	if len(result.Items) != 1 || result.Items[0].Name != "Alice" {
 		t.Errorf("expected Alice, got %+v", result.Items)
@@ -204,8 +236,8 @@ func TestList_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if result.Total != 0 {
-		t.Errorf("Total=%d; want 0", result.Total)
+	if result.TotalItems != 0 {
+		t.Errorf("TotalItems=%d; want 0", result.TotalItems)
 	}
 	if result.Items == nil {
 		t.Error("Items should not be nil")
@@ -235,8 +267,8 @@ func TestList_Pagination25(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if result.Total != 25 {
-		t.Errorf("Total=%d; want 25", result.Total)
+	if result.TotalItems != 25 {
+		t.Errorf("TotalItems=%d; want 25", result.TotalItems)
 	}
 	if len(result.Items) != 10 {
 		t.Errorf("Items count=%d; want 10", len(result.Items))
@@ -244,8 +276,8 @@ func TestList_Pagination25(t *testing.T) {
 	if result.TotalPages != 3 {
 		t.Errorf("TotalPages=%d; want 3", result.TotalPages)
 	}
-	if result.Page != 2 {
-		t.Errorf("Page=%d; want 2", result.Page)
+	if result.CurrentPage != 2 {
+		t.Errorf("CurrentPage=%d; want 2", result.CurrentPage)
 	}
 	// Page 2 with id:asc should start at User11 (ID offset 11)
 	if result.Items[0].Name != "User11" {
@@ -328,8 +360,8 @@ func TestList_FilterLike(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if result.Total != 2 {
-		t.Errorf("Total=%d; want 2", result.Total)
+	if result.TotalItems != 2 {
+		t.Errorf("TotalItems=%d; want 2", result.TotalItems)
 	}
 
 	// __like on email
@@ -342,8 +374,8 @@ func TestList_FilterLike(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if result.Total != 2 {
-		t.Errorf("Total=%d; want 2 (alice@, alice.jones@)", result.Total)
+	if result.TotalItems != 2 {
+		t.Errorf("TotalItems=%d; want 2 (alice@, alice.jones@)", result.TotalItems)
 	}
 
 	// __like with no match
@@ -356,7 +388,7 @@ func TestList_FilterLike(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if result.Total != 0 {
-		t.Errorf("Total=%d; want 0", result.Total)
+	if result.TotalItems != 0 {
+		t.Errorf("TotalItems=%d; want 0", result.TotalItems)
 	}
 }

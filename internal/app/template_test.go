@@ -9,6 +9,10 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/simp-lee/pagination"
+
+	"github.com/simp-lee/gobase/web"
 )
 
 // testFS returns an in-memory filesystem suitable for testing template rendering.
@@ -293,6 +297,88 @@ func TestTemplateRenderer_Instance_WithFuncMap(t *testing.T) {
 			t.Errorf("body missing %q:\n%s", want, body)
 		}
 	}
+}
+
+func TestPaginationTemplate_UsesPagesRange(t *testing.T) {
+	r, err := NewTemplateRenderer(web.EmbeddedFS, false)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	data := map[string]any{
+		"Users":   []any{},
+		"BaseURL": "/users",
+		"Pagination": &pagination.Pagination[any]{
+			CurrentPage:      5,
+			ItemsPerPage:     10,
+			TotalPages:       10,
+			PreviousPage:     intPtr(4),
+			NextPage:         intPtr(6),
+			FirstPage:        1,
+			LastPage:         10,
+			FirstPageInRange: 4,
+			LastPageInRange:  6,
+			Pages:            []int{4, 5, 6},
+		},
+	}
+
+	inst := r.Instance("user/list.html", data)
+	w := httptest.NewRecorder()
+	if err := inst.Render(w); err != nil {
+		t.Fatalf("Render() error: %v", err)
+	}
+
+	body := w.Body.String()
+	for _, want := range []string{
+		"href=\"/users?page=4&page_size=10\"",
+		"href=\"/users?page=6&page_size=10\"",
+		"href=\"/users?page=1&page_size=10\"",
+		"href=\"/users?page=10&page_size=10\"",
+		"&hellip;",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+
+	if strings.Contains(body, "href=\"/users?page=5&page_size=10\"") {
+		t.Error("current page should be rendered as active state, not link")
+	}
+}
+
+func TestPaginationTemplate_HidesNavigationWhenSinglePage(t *testing.T) {
+	r, err := NewTemplateRenderer(web.EmbeddedFS, false)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	data := map[string]any{
+		"Users":   []any{},
+		"BaseURL": "/users",
+		"Pagination": &pagination.Pagination[any]{
+			CurrentPage:  1,
+			ItemsPerPage: 10,
+			TotalPages:   1,
+			FirstPage:    1,
+			LastPage:     1,
+			Pages:        []int{1},
+		},
+	}
+
+	inst := r.Instance("user/list.html", data)
+	w := httptest.NewRecorder()
+	if err := inst.Render(w); err != nil {
+		t.Fatalf("Render() error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, `aria-label="分页导航"`) {
+		t.Error("pagination navigation should not render when total pages is 1")
+	}
+}
+
+func intPtr(v int) *int {
+	return &v
 }
 
 // ---------------------------------------------------------------------------
