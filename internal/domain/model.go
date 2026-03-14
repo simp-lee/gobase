@@ -17,3 +17,12 @@ type PageRequest struct {
 	Sort     string
 	Filter   map[string]string
 }
+
+// PageResult holds a page of items together with pagination metadata.
+type PageResult[T any] struct {
+	Items       []T   `json:"items"`
+	TotalItems  int64 `json:"total_items"`
+	TotalPages  int   `json:"total_pages"`
+	CurrentPage int   `json:"current_page"`
+	PageSize    int   `json:"page_size"`
+}

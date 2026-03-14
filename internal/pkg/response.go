@@ -28,6 +28,16 @@ type ValidationErrorResponse struct {
 	Errors  map[string]string `json:"errors"`
 }
 
+// FieldValidationError sends a 400 JSON response with explicit field-level
+// validation messages.
+func FieldValidationError(c *gin.Context, fieldErrors map[string]string) {
+	c.JSON(http.StatusBadRequest, ValidationErrorResponse{
+		Code:    http.StatusBadRequest,
+		Message: "validation error",
+		Errors:  fieldErrors,
+	})
+}
+
 // Success sends a 200 JSON response with the given data.
 func Success(c *gin.Context, data any) {
 	c.JSON(http.StatusOK, Response{
@@ -46,6 +56,8 @@ func Error(c *gin.Context, err error) {
 	msg := "internal error"
 	if errors.As(err, &appErr) {
 		msg = appErr.Message
+	} else {
+		slog.Error("unhandled error", slog.Any("error", err))
 	}
 
 	c.JSON(status, Response{
@@ -144,11 +156,7 @@ func validationErrorWithType(c *gin.Context, err error, obj any) {
 		fieldErrors[name] = friendlyMessage(fe)
 	}
 
-	c.JSON(http.StatusBadRequest, ValidationErrorResponse{
-		Code:    http.StatusBadRequest,
-		Message: "validation error",
-		Errors:  fieldErrors,
-	})
+	FieldValidationError(c, fieldErrors)
 }
 
 // buildJSONTagMap returns a map from struct field name to its JSON tag name.
@@ -165,14 +173,40 @@ func buildJSONTagMap(obj any) map[string]string {
 		return nil
 	}
 	m := make(map[string]string, t.NumField())
+	collectJSONTags(t, m)
+	return m
+}
+
+// collectJSONTags populates m with struct-field-name → json-tag-name entries,
+// recursing into anonymous (embedded) struct fields. The visited set prevents
+// infinite recursion when self-referential embedded pointer types are present.
+func collectJSONTags(t reflect.Type, m map[string]string) {
+	collectJSONTagsWithVisited(t, m, make(map[reflect.Type]bool))
+}
+
+func collectJSONTagsWithVisited(t reflect.Type, m map[string]string, visited map[reflect.Type]bool) {
+	if visited[t] {
+		return
+	}
+	visited[t] = true
+
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
+		if f.Anonymous {
+			ft := f.Type
+			for ft.Kind() == reflect.Ptr {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct {
+				collectJSONTagsWithVisited(ft, m, visited)
+				continue
+			}
+		}
 		tag := f.Tag.Get("json")
 		if name := parseJSONTagName(tag); name != "" {
 			m[f.Name] = name
 		}
 	}
-	return m
 }
 
 // parseJSONTagName extracts the field name from a JSON struct tag value.

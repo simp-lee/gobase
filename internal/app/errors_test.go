@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -103,7 +104,6 @@ func TestRenderError_HTML_FallsBackToPlainText(t *testing.T) {
 		{"500 fallback", 500, "500 Internal Server Error"},
 		{"400 fallback", 400, "400 Bad Request"},
 		{"404 fallback", 404, "404 Not Found"},
-		{"429 fallback", 429, "429 Too Many Requests"},
 	}
 
 	for _, tt := range tests {
@@ -127,6 +127,52 @@ func TestRenderError_HTML_FallsBackToPlainText(t *testing.T) {
 			ct := w.Header().Get("Content-Type")
 			if ct != "text/plain; charset=utf-8" {
 				t.Fatalf("Content-Type = %q, want %q", ct, "text/plain; charset=utf-8")
+			}
+		})
+	}
+}
+
+func TestRenderError_HTML_UnmappedStatus_UsesGenericStatusPage(t *testing.T) {
+	renderer, err := NewTemplateRenderer(testFS(), false)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		code      int
+		wantBody  string
+		notWanted string
+	}{
+		{name: "408 timeout", code: 408, wantBody: "<h1>408 Request Timeout</h1>", notWanted: "404 Not Found"},
+		{name: "429 rate limit", code: 429, wantBody: "<h1>429 Too Many Requests</h1>", notWanted: "404 Not Found"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, engine := gin.CreateTestContext(w)
+			engine.HTMLRender = renderer
+			c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+			c.Request.Header.Set("Accept", "text/html")
+
+			renderError(c, tt.code, "ignored for html")
+
+			if w.Code != tt.code {
+				t.Fatalf("status = %d, want %d", w.Code, tt.code)
+			}
+
+			body := w.Body.String()
+			if !strings.Contains(body, tt.wantBody) {
+				t.Fatalf("body = %q, want to contain %q", body, tt.wantBody)
+			}
+			if strings.Contains(body, tt.notWanted) {
+				t.Fatalf("body = %q, should not contain %q", body, tt.notWanted)
+			}
+
+			ct := w.Header().Get("Content-Type")
+			if ct != "text/html; charset=utf-8" {
+				t.Fatalf("Content-Type = %q, want %q", ct, "text/html; charset=utf-8")
 			}
 		})
 	}

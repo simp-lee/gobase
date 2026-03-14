@@ -2,25 +2,24 @@ package user
 
 import (
 	"context"
-	"errors"
-	"strings"
 
 	"github.com/simp-lee/gobase/internal/domain"
 	"github.com/simp-lee/gobase/internal/pkg"
-	"github.com/simp-lee/pagination"
 	"gorm.io/gorm"
 )
 
 // Allowed fields for sorting and filtering in List queries.
 var (
-	allowedSortFields   = []string{"id", "name", "email", "created_at", "updated_at"}
-	allowedFilterFields = []string{"name", "email"}
+	allowedSortFields   = []string{"id", "username", "email", "status", "created_at", "updated_at"}
+	allowedFilterFields = []string{"username", "email", "status"}
 )
 
 // userRepository implements domain.UserRepository using GORM.
 type userRepository struct {
 	db *gorm.DB
 }
+
+var _ domain.UserRepository = (*userRepository)(nil)
 
 // NewUserRepository creates a new UserRepository backed by the given GORM database.
 func NewUserRepository(db *gorm.DB) domain.UserRepository {
@@ -30,7 +29,7 @@ func NewUserRepository(db *gorm.DB) domain.UserRepository {
 // Create inserts a new user into the database.
 func (r *userRepository) Create(ctx context.Context, user *domain.User) error {
 	if err := r.db.WithContext(ctx).Create(user).Error; err != nil {
-		return mapError(err)
+		return pkg.MapDBError(err)
 	}
 	return nil
 }
@@ -39,7 +38,7 @@ func (r *userRepository) Create(ctx context.Context, user *domain.User) error {
 func (r *userRepository) GetByID(ctx context.Context, id uint) (*domain.User, error) {
 	var user domain.User
 	if err := r.db.WithContext(ctx).First(&user, id).Error; err != nil {
-		return nil, mapError(err)
+		return nil, pkg.MapDBError(err)
 	}
 	return &user, nil
 }
@@ -48,27 +47,27 @@ func (r *userRepository) GetByID(ctx context.Context, id uint) (*domain.User, er
 func (r *userRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	var user domain.User
 	if err := r.db.WithContext(ctx).Where("email = ?", email).First(&user).Error; err != nil {
-		return nil, mapError(err)
+		return nil, pkg.MapDBError(err)
 	}
 	return &user, nil
 }
 
 // List returns a paginated, sorted, and filtered list of users.
-func (r *userRepository) List(ctx context.Context, req domain.PageRequest) (*pagination.Pagination[domain.User], error) {
+func (r *userRepository) List(ctx context.Context, req domain.PageRequest) (*domain.PageResult[domain.User], error) {
 	result, err := pkg.PaginateGORM[domain.User](ctx, r.db.WithContext(ctx).Model(&domain.User{}), req, pkg.ListOptions{
 		SortFields:   allowedSortFields,
 		FilterFields: allowedFilterFields,
 	})
 	if err != nil {
-		return nil, mapError(err)
+		return nil, pkg.MapDBError(err)
 	}
-	return result, nil
+	return pkg.ToPageResult(result), nil
 }
 
 // Update saves changes to an existing user.
 func (r *userRepository) Update(ctx context.Context, user *domain.User) error {
 	if err := r.db.WithContext(ctx).Save(user).Error; err != nil {
-		return mapError(err)
+		return pkg.MapDBError(err)
 	}
 	return nil
 }
@@ -77,34 +76,10 @@ func (r *userRepository) Update(ctx context.Context, user *domain.User) error {
 func (r *userRepository) Delete(ctx context.Context, id uint) error {
 	result := r.db.WithContext(ctx).Delete(&domain.User{}, id)
 	if result.Error != nil {
-		return mapError(result.Error)
+		return pkg.MapDBError(result.Error)
 	}
 	if result.RowsAffected == 0 {
 		return domain.ErrNotFound
 	}
 	return nil
-}
-
-// mapError converts GORM errors to domain errors.
-func mapError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return domain.ErrNotFound
-	}
-	if errors.Is(err, gorm.ErrDuplicatedKey) || isDuplicateKeyError(err) {
-		return domain.NewAppError(domain.CodeAlreadyExists, "already exists", err)
-	}
-	return domain.NewAppError(domain.CodeInternal, "database error", err)
-}
-
-// isDuplicateKeyError detects unique constraint violations by examining the
-// error message. This is needed because not all GORM dialectors translate
-// driver-level errors to gorm.ErrDuplicatedKey (e.g. the pure-Go SQLite driver).
-func isDuplicateKeyError(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unique constraint") ||
-		strings.Contains(msg, "duplicate key") ||
-		strings.Contains(msg, "duplicate entry")
 }

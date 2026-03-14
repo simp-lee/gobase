@@ -26,7 +26,7 @@ func (h *UserHandler) Create(c *gin.Context) {
 		return
 	}
 
-	user, err := h.svc.CreateUser(c.Request.Context(), req.Name, req.Email)
+	user, err := h.svc.CreateUser(c.Request.Context(), req.Username, req.Email)
 	if err != nil {
 		pkg.Error(c, err)
 		return
@@ -82,7 +82,9 @@ func (h *UserHandler) Update(c *gin.Context) {
 		return
 	}
 
-	user, err := h.svc.UpdateUser(c.Request.Context(), id, req.Name, req.Email)
+	ctx := withAdminFieldAuthorized(c.Request.Context(), isRequesterAdmin(c))
+
+	user, err := h.svc.UpdateUser(ctx, id, req.Username, req.Email, req.Role, req.Status)
 	if err != nil {
 		pkg.Error(c, err)
 		return

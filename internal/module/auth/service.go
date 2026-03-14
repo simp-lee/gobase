@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/mail"
 	"strconv"
 	"strings"
@@ -18,7 +19,9 @@ import (
 // Service defines the authentication operations.
 type Service interface {
 	Login(ctx context.Context, email, password string) (*TokenResponse, error)
-	Register(ctx context.Context, name, email, password string) (*domain.User, error)
+	Register(ctx context.Context, username, email, password string) (*domain.User, error)
+	Logout(ctx context.Context, token string) error
+	RefreshToken(ctx context.Context, oldToken string) (*TokenResponse, error)
 }
 
 // authService implements Service.
@@ -27,6 +30,8 @@ type authService struct {
 	userRepo    domain.UserRepository
 	tokenExpiry time.Duration
 }
+
+var _ Service = (*authService)(nil)
 
 // NewService creates a new auth Service.
 func NewService(jwtSvc jwt.Service, userRepo domain.UserRepository, tokenExpiry time.Duration) Service {
@@ -37,24 +42,51 @@ func NewService(jwtSvc jwt.Service, userRepo domain.UserRepository, tokenExpiry 
 	}
 }
 
+// dummyHash is a pre-computed bcrypt hash (cost 10) used to perform a constant-time
+// dummy comparison when the user is not found, preventing timing side-channel attacks
+// that could reveal whether an email is registered.
+// Generated via: bcrypt.GenerateFromPassword([]byte("timing-safe-dummy"), bcrypt.DefaultCost)
+var dummyHash = []byte("$2a$10$PTvOjdO/sIXsLrkc0hwSmuCvcW1JPRkbKUyNj0e1DyINAUnSFnrVC")
+
+var bcryptCompareHashAndPassword = bcrypt.CompareHashAndPassword
+
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
 // Login authenticates a user by email and password and returns a JWT token.
 func (s *authService) Login(ctx context.Context, email, password string) (*TokenResponse, error) {
+	email = normalizeEmail(email)
 	user, err := s.userRepo.GetByEmail(ctx, email)
 	if err != nil {
-		// Don't reveal whether the user exists — always return unauthorized.
 		if domain.IsNotFound(err) {
+			// Perform a dummy bcrypt comparison to eliminate timing differences,
+			// preventing user enumeration via response-time analysis.
+			bcryptCompareHashAndPassword(dummyHash, []byte(password)) //nolint:errcheck
 			return nil, domain.ErrUnauthorized
 		}
 		return nil, err
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+	if err := bcryptCompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		return nil, domain.ErrUnauthorized
+	}
+
+	switch user.Status {
+	case domain.StatusDisabled:
+		return nil, domain.NewAppError(domain.CodeForbidden, "your account has been disabled", nil)
+	case domain.StatusPending:
+		return nil, domain.NewAppError(domain.CodeForbidden, "your account is pending activation", nil)
+	}
+
+	role := strings.TrimSpace(user.Role)
+	if role == "" {
+		role = domain.RoleUser
 	}
 
 	token, err := s.jwtSvc.GenerateToken(
 		strconv.FormatUint(uint64(user.ID), 10),
-		nil, // roles — RBAC uses a separate service
+		[]string{role},
 		s.tokenExpiry,
 	)
 	if err != nil {
@@ -72,17 +104,17 @@ func (s *authService) Login(ctx context.Context, email, password string) (*Token
 	}, nil
 }
 
-// validateRegisterInput validates registration input. name and email are expected
+// validateRegisterInput validates registration input. username and email are expected
 // to be pre-trimmed by callers; TrimSpace here ensures the validator is self-contained.
-func validateRegisterInput(name, email, password string) error {
-	nameLen := utf8.RuneCountInString(strings.TrimSpace(name))
+func validateRegisterInput(username, email, password string) error {
+	nameLen := utf8.RuneCountInString(strings.TrimSpace(username))
 	if nameLen == 0 {
-		return domain.NewAppError(domain.CodeValidation, "name is required", nil)
+		return domain.NewAppError(domain.CodeValidation, "username is required", nil)
 	}
 	if nameLen > 100 {
-		return domain.NewAppError(domain.CodeValidation, "name must not exceed 100 characters", nil)
+		return domain.NewAppError(domain.CodeValidation, "username must not exceed 100 characters", nil)
 	}
-	trimmedEmail := strings.TrimSpace(email)
+	trimmedEmail := normalizeEmail(email)
 	if len(trimmedEmail) == 0 {
 		return domain.NewAppError(domain.CodeValidation, "email is required", nil)
 	}
@@ -100,10 +132,10 @@ func validateRegisterInput(name, email, password string) error {
 }
 
 // Register creates a new user with the given credentials.
-func (s *authService) Register(ctx context.Context, name, email, password string) (*domain.User, error) {
-	name = strings.TrimSpace(name)
-	email = strings.TrimSpace(email)
-	if err := validateRegisterInput(name, email, password); err != nil {
+func (s *authService) Register(ctx context.Context, username, email, password string) (*domain.User, error) {
+	username = strings.TrimSpace(username)
+	email = normalizeEmail(email)
+	if err := validateRegisterInput(username, email, password); err != nil {
 		return nil, err
 	}
 
@@ -113,9 +145,11 @@ func (s *authService) Register(ctx context.Context, name, email, password string
 	}
 
 	user := domain.User{
-		Name:         name,
+		Username:     username,
 		Email:        email,
 		PasswordHash: string(hash),
+		Role:         domain.RoleUser,
+		Status:       domain.StatusActive,
 	}
 
 	if err := s.userRepo.Create(ctx, &user); err != nil {
@@ -123,4 +157,43 @@ func (s *authService) Register(ctx context.Context, name, email, password string
 	}
 
 	return &user, nil
+}
+
+// Logout revokes the given JWT token so it can no longer be used.
+func (s *authService) Logout(_ context.Context, token string) error {
+	if err := s.jwtSvc.RevokeToken(token); err != nil {
+		if isJWTUnauthorizedError(err) {
+			return domain.ErrUnauthorized
+		}
+		return domain.NewAppError(domain.CodeInternal, "failed to revoke token", err)
+	}
+	return nil
+}
+
+// RefreshToken exchanges the old JWT for a new one with a fresh expiry.
+func (s *authService) RefreshToken(_ context.Context, oldToken string) (*TokenResponse, error) {
+	newToken, err := s.jwtSvc.RefreshToken(oldToken)
+	if err != nil {
+		if isJWTUnauthorizedError(err) {
+			return nil, domain.ErrUnauthorized
+		}
+		return nil, domain.NewAppError(domain.CodeInternal, "failed to refresh token", err)
+	}
+
+	parsed, err := s.jwtSvc.ParseToken(newToken)
+	if err != nil {
+		return nil, domain.NewAppError(domain.CodeInternal, "failed to parse refreshed token", err)
+	}
+
+	return &TokenResponse{
+		Token:     newToken,
+		ExpiresAt: parsed.ExpiresAt.Unix(),
+	}, nil
+}
+
+// isJWTUnauthorizedError returns true for jwt errors that map to 401 Unauthorized.
+func isJWTUnauthorizedError(err error) bool {
+	return errors.Is(err, jwt.ErrInvalidToken) ||
+		errors.Is(err, jwt.ErrExpiredToken) ||
+		errors.Is(err, jwt.ErrRevokedToken)
 }

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/knadh/koanf/parsers/yaml"
@@ -84,6 +83,7 @@ type PoolConfig struct {
 	MaxIdleConns    int    `koanf:"max_idle_conns"`
 	MaxOpenConns    int    `koanf:"max_open_conns"`
 	ConnMaxLifetime string `koanf:"conn_max_lifetime"`
+	ConnMaxIdleTime string `koanf:"conn_max_idle_time"`
 }
 
 // LogConfig holds logging settings.
@@ -100,11 +100,12 @@ type LogConfig struct {
 
 // AuthConfig holds authentication and authorization settings.
 type AuthConfig struct {
-	Enabled     bool       `koanf:"enabled"`
-	JWTSecret   string     `koanf:"jwt_secret"`
-	TokenExpiry string     `koanf:"token_expiry"`
-	PublicPaths []string   `koanf:"public_paths"`
-	RBAC        RBACConfig `koanf:"rbac"`
+	Enabled      bool       `koanf:"enabled"`
+	JWTSecret    string     `koanf:"jwt_secret"`
+	TokenExpiry  string     `koanf:"token_expiry"`
+	CookieSecure *bool      `koanf:"cookie_secure"`
+	PublicPaths  []string   `koanf:"public_paths"`
+	RBAC         RBACConfig `koanf:"rbac"`
 }
 
 // RBACConfig holds role-based access control settings.
@@ -161,6 +162,44 @@ func Load(configPath string) (*Config, error) {
 
 // Validate checks cross-field constraints and supported values.
 func (c *Config) Validate() error {
+	if err := c.validateServer(); err != nil {
+		return err
+	}
+	if err := c.validateDatabase(); err != nil {
+		return err
+	}
+	if err := c.validateAuth(); err != nil {
+		return err
+	}
+	if err := c.validateLog(); err != nil {
+		return err
+	}
+
+	// Validate CSRF secret in release mode.
+	// Kept at the end of Validate() so that database/auth/log checks run first,
+	// producing more specific errors when csrf_secret is also missing.
+	if c.Server.Mode == gin.ReleaseMode {
+		csrfSecret := strings.TrimSpace(c.Server.CSRFSecret)
+		if csrfSecret == "" {
+			return fmt.Errorf("server.csrf_secret is required when server.mode is %q", gin.ReleaseMode)
+		}
+		if IsPlaceholderCSRFSecret(csrfSecret) {
+			return fmt.Errorf("invalid server.csrf_secret: placeholder/default values are not allowed in release mode")
+		}
+		if len(csrfSecret) < 32 {
+			return fmt.Errorf("invalid server.csrf_secret: must be at least 32 characters")
+		}
+		if CountSecretClasses(csrfSecret) < 3 {
+			return fmt.Errorf("server.csrf_secret must include at least 3 character classes (lowercase, uppercase, digit, symbol) in release mode")
+		}
+		c.Server.CSRFSecret = csrfSecret
+	}
+
+	return nil
+}
+
+// validateServer validates server-related configuration fields.
+func (c *Config) validateServer() error {
 	// Validate server.mode.
 	mode := strings.TrimSpace(c.Server.Mode)
 	switch mode {
@@ -182,66 +221,9 @@ func (c *Config) Validate() error {
 	}
 	c.Server.Host = host
 
-	// Validate database.driver.
-	switch c.Database.Driver {
-	case "sqlite", "postgres":
-		// ok
-	default:
-		return fmt.Errorf("invalid database.driver %q: must be one of %q, %q", c.Database.Driver, "sqlite", "postgres")
-	}
-
-	if c.Database.Driver == "sqlite" {
-		sqlitePath := strings.TrimSpace(c.Database.SQLite.Path)
-		if sqlitePath == "" {
-			return fmt.Errorf("database.sqlite.path is required when driver is sqlite")
-		}
-		c.Database.SQLite.Path = sqlitePath
-	}
-
-	// When driver is postgres, required connection fields must be valid.
-	if c.Database.Driver == "postgres" {
-		host := strings.TrimSpace(c.Database.Postgres.Host)
-		if host == "" {
-			return fmt.Errorf("database.postgres.host is required when driver is postgres")
-		}
-		if c.Database.Postgres.Port < 1 || c.Database.Postgres.Port > 65535 {
-			return fmt.Errorf("invalid database.postgres.port %d: must be between 1 and 65535", c.Database.Postgres.Port)
-		}
-		user := strings.TrimSpace(c.Database.Postgres.User)
-		if user == "" {
-			return fmt.Errorf("database.postgres.user is required when driver is postgres")
-		}
-		dbName := strings.TrimSpace(c.Database.Postgres.DBName)
-		if dbName == "" {
-			return fmt.Errorf("database.postgres.dbname is required when driver is postgres")
-		}
-		sslMode := strings.TrimSpace(c.Database.Postgres.SSLMode)
-
-		switch sslMode {
-		case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
-			// ok
-		default:
-			return fmt.Errorf("invalid database.postgres.sslmode %q: must be one of %q, %q, %q, %q, %q, %q", c.Database.Postgres.SSLMode, "disable", "allow", "prefer", "require", "verify-ca", "verify-full")
-		}
-		if c.Server.Mode == gin.ReleaseMode {
-			switch sslMode {
-			case "require", "verify-ca", "verify-full":
-				// ok
-			default:
-				return fmt.Errorf("invalid database.postgres.sslmode %q for server.mode %q: must be one of %q, %q, %q", c.Database.Postgres.SSLMode, gin.ReleaseMode, "require", "verify-ca", "verify-full")
-			}
-		}
-
-		c.Database.Postgres.Host = host
-		c.Database.Postgres.User = user
-		c.Database.Postgres.DBName = dbName
-		c.Database.Postgres.SSLMode = sslMode
-	}
-
-	// Normalize optional duration fields: whitespace-only means unset.
+	// Normalize optional server duration fields: whitespace-only means unset.
 	c.Server.Timeout = strings.TrimSpace(c.Server.Timeout)
 	c.Server.CORS.MaxAge = strings.TrimSpace(c.Server.CORS.MaxAge)
-	c.Database.Pool.ConnMaxLifetime = strings.TrimSpace(c.Database.Pool.ConnMaxLifetime)
 	c.Server.Cache.TTL = strings.TrimSpace(c.Server.Cache.TTL)
 
 	// Validate server.timeout (optional; must be a valid Go duration if set).
@@ -266,6 +248,128 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.validateRateLimitConfig(); err != nil {
+		return err
+	}
+	return c.validateCacheConfig()
+}
+
+// validateRateLimitConfig validates server.rate_limit settings.
+func (c *Config) validateRateLimitConfig() error {
+	if !c.Server.RateLimit.Enabled {
+		return nil
+	}
+	if c.Server.RateLimit.RPS <= 0 {
+		return fmt.Errorf("invalid server.rate_limit.rps %v: must be positive when rate limiting is enabled", c.Server.RateLimit.RPS)
+	}
+	if c.Server.RateLimit.Burst <= 0 {
+		return fmt.Errorf("invalid server.rate_limit.burst %d: must be positive when rate limiting is enabled", c.Server.RateLimit.Burst)
+	}
+	return nil
+}
+
+// validateCacheConfig validates server.cache settings.
+func (c *Config) validateCacheConfig() error {
+	if !c.Server.Cache.Enabled {
+		return nil
+	}
+	d, err := time.ParseDuration(c.Server.Cache.TTL)
+	if err != nil {
+		return fmt.Errorf("invalid server.cache.ttl %q: %w", c.Server.Cache.TTL, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("invalid server.cache.ttl %q: must be greater than 0", c.Server.Cache.TTL)
+	}
+	if c.Server.Cache.MaxSize <= 0 {
+		return fmt.Errorf("invalid server.cache.max_size %d: must be positive when caching is enabled", c.Server.Cache.MaxSize)
+	}
+	return nil
+}
+
+// validateDatabase validates database-related configuration fields.
+func (c *Config) validateDatabase() error {
+	// Validate database.driver.
+	switch c.Database.Driver {
+	case "sqlite", "postgres":
+		// ok
+	default:
+		return fmt.Errorf("invalid database.driver %q: must be one of %q, %q", c.Database.Driver, "sqlite", "postgres")
+	}
+
+	if c.Database.Driver == "sqlite" {
+		sqlitePath := strings.TrimSpace(c.Database.SQLite.Path)
+		if sqlitePath == "" {
+			return fmt.Errorf("database.sqlite.path is required when driver is sqlite")
+		}
+		c.Database.SQLite.Path = sqlitePath
+	}
+
+	// When driver is postgres, required connection fields must be valid.
+	if c.Database.Driver == "postgres" {
+		if err := c.validatePostgresConfig(); err != nil {
+			return err
+		}
+	}
+
+	// Validate connection pool settings.
+	return c.validatePoolConfig()
+}
+
+// validatePostgresConfig validates postgres-specific connection fields.
+func (c *Config) validatePostgresConfig() error {
+	host := strings.TrimSpace(c.Database.Postgres.Host)
+	if host == "" {
+		return fmt.Errorf("database.postgres.host is required when driver is postgres")
+	}
+	if c.Database.Postgres.Port < 1 || c.Database.Postgres.Port > 65535 {
+		return fmt.Errorf("invalid database.postgres.port %d: must be between 1 and 65535", c.Database.Postgres.Port)
+	}
+	user := strings.TrimSpace(c.Database.Postgres.User)
+	if user == "" {
+		return fmt.Errorf("database.postgres.user is required when driver is postgres")
+	}
+	dbName := strings.TrimSpace(c.Database.Postgres.DBName)
+	if dbName == "" {
+		return fmt.Errorf("database.postgres.dbname is required when driver is postgres")
+	}
+	password := strings.TrimSpace(c.Database.Postgres.Password)
+	sslMode := strings.TrimSpace(c.Database.Postgres.SSLMode)
+
+	switch sslMode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+		// ok
+	default:
+		return fmt.Errorf("invalid database.postgres.sslmode %q: must be one of %q, %q, %q, %q, %q, %q", c.Database.Postgres.SSLMode, "disable", "allow", "prefer", "require", "verify-ca", "verify-full")
+	}
+	if c.Server.Mode == gin.ReleaseMode {
+		if password == "" {
+			return fmt.Errorf("database.postgres.password is required when server.mode is %q", gin.ReleaseMode)
+		}
+		if IsPlaceholderPostgresPassword(password) {
+			return fmt.Errorf("invalid database.postgres.password: placeholder/default values are not allowed in release mode")
+		}
+		switch sslMode {
+		case "require", "verify-ca", "verify-full":
+			// ok
+		default:
+			return fmt.Errorf("invalid database.postgres.sslmode %q for server.mode %q: must be one of %q, %q, %q", c.Database.Postgres.SSLMode, gin.ReleaseMode, "require", "verify-ca", "verify-full")
+		}
+	}
+
+	c.Database.Postgres.Host = host
+	c.Database.Postgres.User = user
+	c.Database.Postgres.Password = password
+	c.Database.Postgres.DBName = dbName
+	c.Database.Postgres.SSLMode = sslMode
+	return nil
+}
+
+// validatePoolConfig validates database connection pool settings.
+func (c *Config) validatePoolConfig() error {
+	// Normalize optional pool duration fields: whitespace-only means unset.
+	c.Database.Pool.ConnMaxLifetime = strings.TrimSpace(c.Database.Pool.ConnMaxLifetime)
+	c.Database.Pool.ConnMaxIdleTime = strings.TrimSpace(c.Database.Pool.ConnMaxIdleTime)
+
 	// Validate database.pool.conn_max_lifetime (optional; must be positive if set).
 	if lm := c.Database.Pool.ConnMaxLifetime; lm != "" {
 		d, err := time.ParseDuration(lm)
@@ -277,88 +381,69 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate server.rate_limit (when enabled, rps and burst must be positive).
-	if c.Server.RateLimit.Enabled {
-		if c.Server.RateLimit.RPS <= 0 {
-			return fmt.Errorf("invalid server.rate_limit.rps %v: must be positive when rate limiting is enabled", c.Server.RateLimit.RPS)
-		}
-		if c.Server.RateLimit.Burst <= 0 {
-			return fmt.Errorf("invalid server.rate_limit.burst %d: must be positive when rate limiting is enabled", c.Server.RateLimit.Burst)
-		}
-	}
-
-	// Validate server.cache (when enabled, ttl must be a valid positive duration, max_size > 0).
-	if c.Server.Cache.Enabled {
-		d, err := time.ParseDuration(c.Server.Cache.TTL)
+	// Validate database.pool.conn_max_idle_time (optional; must be positive if set).
+	if it := c.Database.Pool.ConnMaxIdleTime; it != "" {
+		d, err := time.ParseDuration(it)
 		if err != nil {
-			return fmt.Errorf("invalid server.cache.ttl %q: %w", c.Server.Cache.TTL, err)
+			return fmt.Errorf("invalid database.pool.conn_max_idle_time %q: %w", c.Database.Pool.ConnMaxIdleTime, err)
 		}
 		if d <= 0 {
-			return fmt.Errorf("invalid server.cache.ttl %q: must be greater than 0", c.Server.Cache.TTL)
-		}
-		if c.Server.Cache.MaxSize <= 0 {
-			return fmt.Errorf("invalid server.cache.max_size %d: must be positive when caching is enabled", c.Server.Cache.MaxSize)
+			return fmt.Errorf("invalid database.pool.conn_max_idle_time %q: must be greater than 0", c.Database.Pool.ConnMaxIdleTime)
 		}
 	}
 
+	// Validate database.pool: negative conn counts.
+	if c.Database.Pool.MaxIdleConns < 0 {
+		return fmt.Errorf("invalid database.pool.max_idle_conns %d: must be greater than or equal to 0", c.Database.Pool.MaxIdleConns)
+	}
+	if c.Database.Pool.MaxOpenConns < 0 {
+		return fmt.Errorf("invalid database.pool.max_open_conns %d: must be greater than or equal to 0", c.Database.Pool.MaxOpenConns)
+	}
+
+	// Validate database.pool: MaxIdleConns must not exceed MaxOpenConns.
+	// Uses effective values so the check catches misconfigurations when either
+	// value is zero (meaning "use default": idle=10, open=100).
+	effIdle := effectiveMaxIdleConns(c.Database.Pool.MaxIdleConns)
+	effOpen := effectiveMaxOpenConns(c.Database.Pool.MaxOpenConns)
+	if effIdle > effOpen {
+		return fmt.Errorf("invalid database.pool: max_idle_conns (%d, effective %d) must not exceed max_open_conns (%d, effective %d)",
+			c.Database.Pool.MaxIdleConns, effIdle, c.Database.Pool.MaxOpenConns, effOpen)
+	}
+
+	return nil
+}
+
+// validateAuth validates authentication and authorization configuration.
+func (c *Config) validateAuth() error {
 	// Validate auth config (when enabled).
 	if c.Auth.RBAC.Enabled && !c.Auth.Enabled {
 		return fmt.Errorf("auth.rbac.enabled requires auth.enabled to be true")
 	}
 
 	if c.Auth.Enabled {
-		jwtSecret := strings.TrimSpace(c.Auth.JWTSecret)
-		if jwtSecret == "" {
-			return fmt.Errorf("auth.jwt_secret is required when auth is enabled")
+		if err := c.validateJWTConfig(); err != nil {
+			return err
 		}
-		if len(jwtSecret) < 32 {
-			return fmt.Errorf("invalid auth.jwt_secret: must be at least 32 characters")
-		}
-		c.Auth.JWTSecret = jwtSecret
-
-		tokenExpiry := strings.TrimSpace(c.Auth.TokenExpiry)
-		if tokenExpiry == "" {
-			return fmt.Errorf("auth.token_expiry is required when auth is enabled")
-		}
-		td, err := time.ParseDuration(tokenExpiry)
-		if err != nil {
-			return fmt.Errorf("invalid auth.token_expiry %q: %w", c.Auth.TokenExpiry, err)
-		}
-		if td <= 0 {
-			return fmt.Errorf("invalid auth.token_expiry %q: must be greater than 0", c.Auth.TokenExpiry)
-		}
-		c.Auth.TokenExpiry = tokenExpiry
-
-		publicPaths := make([]string, 0, len(c.Auth.PublicPaths))
-		seenPublicPaths := make(map[string]struct{}, len(c.Auth.PublicPaths))
-		for idx, p := range c.Auth.PublicPaths {
-			normalizedPath := strings.TrimSpace(p)
-			if normalizedPath == "" {
-				return fmt.Errorf("auth.public_paths[%d] cannot be empty when auth is enabled", idx)
-			}
-			if !strings.HasPrefix(normalizedPath, "/") {
-				return fmt.Errorf("invalid auth.public_paths[%d] %q: must start with '/'", idx, p)
-			}
-			if _, exists := seenPublicPaths[normalizedPath]; exists {
-				continue
-			}
-			seenPublicPaths[normalizedPath] = struct{}{}
-			publicPaths = append(publicPaths, normalizedPath)
-		}
-		if len(publicPaths) == 0 {
-			return fmt.Errorf("auth.public_paths is required when auth is enabled")
+		if err := c.validatePublicPaths(); err != nil {
+			return err
 		}
 
-		requiredPublicPaths := []string{"/api/v1/auth/login", "/api/v1/auth/register"}
-		for _, requiredPath := range requiredPublicPaths {
-			if _, exists := seenPublicPaths[requiredPath]; !exists {
-				return fmt.Errorf("auth.public_paths must include %q when auth is enabled", requiredPath)
-			}
+		// Default CookieSecure: nil → true in release mode, false otherwise.
+		if c.Auth.CookieSecure == nil {
+			defaultSecure := c.Server.Mode == gin.ReleaseMode
+			c.Auth.CookieSecure = &defaultSecure
 		}
-		c.Auth.PublicPaths = publicPaths
+
+		// In release mode, cookie_secure must be true.
+		if c.Server.Mode == gin.ReleaseMode && c.Auth.CookieSecure != nil && !*c.Auth.CookieSecure {
+			return fmt.Errorf("auth.cookie_secure must be true when server.mode is %q", gin.ReleaseMode)
+		}
 
 		if c.Server.Mode == gin.ReleaseMode {
-			if CountSecretClasses(jwtSecret) < 3 {
+			if IsPlaceholderJWTSecret(c.Auth.JWTSecret) {
+				return fmt.Errorf("invalid auth.jwt_secret: placeholder/default values are not allowed in release mode")
+			}
+			if CountSecretClasses(c.Auth.JWTSecret) < 3 {
 				return fmt.Errorf("auth.jwt_secret must include at least 3 character classes (lowercase, uppercase, digit, symbol) in release mode")
 			}
 		}
@@ -366,48 +451,120 @@ func (c *Config) Validate() error {
 
 	// Validate RBAC cache config (when RBAC is enabled).
 	if c.Auth.RBAC.Enabled {
-		cacheCfg := &c.Auth.RBAC.Cache
-
-		// Validate cache TTL fields.
-		ttlFields := []struct {
-			name  string
-			value *string
-		}{
-			{"auth.rbac.cache.role_ttl", &cacheCfg.RoleTTL},
-			{"auth.rbac.cache.user_role_ttl", &cacheCfg.UserRoleTTL},
-			{"auth.rbac.cache.permission_ttl", &cacheCfg.PermissionTTL},
-		}
-		for _, f := range ttlFields {
-			v := strings.TrimSpace(*f.value)
-			if v == "" {
-				return fmt.Errorf("%s is required when RBAC is enabled", f.name)
-			}
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				return fmt.Errorf("invalid %s %q: %w", f.name, *f.value, err)
-			}
-			if d <= 0 {
-				return fmt.Errorf("invalid %s %q: must be greater than 0", f.name, *f.value)
-			}
-			*f.value = v
-		}
-
-		// Validate max entries fields.
-		entryFields := []struct {
-			name  string
-			value int
-		}{
-			{"auth.rbac.cache.max_role_entries", cacheCfg.MaxRoleEntries},
-			{"auth.rbac.cache.max_user_entries", cacheCfg.MaxUserEntries},
-			{"auth.rbac.cache.max_permission_entries", cacheCfg.MaxPermissionEntries},
-		}
-		for _, f := range entryFields {
-			if f.value <= 0 {
-				return fmt.Errorf("invalid %s %d: must be positive when RBAC is enabled", f.name, f.value)
-			}
+		if err := c.validateRBACCache(); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// validateJWTConfig validates JWT secret and token expiry settings.
+func (c *Config) validateJWTConfig() error {
+	jwtSecret := strings.TrimSpace(c.Auth.JWTSecret)
+	if jwtSecret == "" {
+		return fmt.Errorf("auth.jwt_secret is required when auth is enabled")
+	}
+	if len(jwtSecret) < 32 {
+		return fmt.Errorf("invalid auth.jwt_secret: must be at least 32 characters")
+	}
+	c.Auth.JWTSecret = jwtSecret
+
+	tokenExpiry := strings.TrimSpace(c.Auth.TokenExpiry)
+	if tokenExpiry == "" {
+		return fmt.Errorf("auth.token_expiry is required when auth is enabled")
+	}
+	td, err := time.ParseDuration(tokenExpiry)
+	if err != nil {
+		return fmt.Errorf("invalid auth.token_expiry %q: %w", c.Auth.TokenExpiry, err)
+	}
+	if td <= 0 {
+		return fmt.Errorf("invalid auth.token_expiry %q: must be greater than 0", c.Auth.TokenExpiry)
+	}
+	c.Auth.TokenExpiry = tokenExpiry
+	return nil
+}
+
+// validatePublicPaths validates and normalizes auth.public_paths.
+func (c *Config) validatePublicPaths() error {
+	publicPaths := make([]string, 0, len(c.Auth.PublicPaths))
+	seenPublicPaths := make(map[string]struct{}, len(c.Auth.PublicPaths))
+	for idx, p := range c.Auth.PublicPaths {
+		normalizedPath := strings.TrimSpace(p)
+		if normalizedPath == "" {
+			return fmt.Errorf("auth.public_paths[%d] cannot be empty when auth is enabled", idx)
+		}
+		if !strings.HasPrefix(normalizedPath, "/") {
+			return fmt.Errorf("invalid auth.public_paths[%d] %q: must start with '/'", idx, p)
+		}
+		if _, exists := seenPublicPaths[normalizedPath]; exists {
+			continue
+		}
+		seenPublicPaths[normalizedPath] = struct{}{}
+		publicPaths = append(publicPaths, normalizedPath)
+	}
+	if len(publicPaths) == 0 {
+		return fmt.Errorf("auth.public_paths is required when auth is enabled")
+	}
+
+	requiredPublicPaths := []string{"/api/v1/auth/login", "/api/v1/auth/register"}
+	for _, requiredPath := range requiredPublicPaths {
+		if _, exists := seenPublicPaths[requiredPath]; !exists {
+			return fmt.Errorf("auth.public_paths must include %q when auth is enabled", requiredPath)
+		}
+	}
+	c.Auth.PublicPaths = publicPaths
+	return nil
+}
+
+// validateRBACCache validates RBAC cache TTLs and max entry counts.
+func (c *Config) validateRBACCache() error {
+	cacheCfg := &c.Auth.RBAC.Cache
+
+	// Validate cache TTL fields.
+	ttlFields := []struct {
+		name  string
+		value *string
+	}{
+		{"auth.rbac.cache.role_ttl", &cacheCfg.RoleTTL},
+		{"auth.rbac.cache.user_role_ttl", &cacheCfg.UserRoleTTL},
+		{"auth.rbac.cache.permission_ttl", &cacheCfg.PermissionTTL},
+	}
+	for _, f := range ttlFields {
+		v := strings.TrimSpace(*f.value)
+		if v == "" {
+			return fmt.Errorf("%s is required when RBAC is enabled", f.name)
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid %s %q: %w", f.name, *f.value, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("invalid %s %q: must be greater than 0", f.name, *f.value)
+		}
+		*f.value = v
+	}
+
+	// Validate max entries fields.
+	entryFields := []struct {
+		name  string
+		value int
+	}{
+		{"auth.rbac.cache.max_role_entries", cacheCfg.MaxRoleEntries},
+		{"auth.rbac.cache.max_user_entries", cacheCfg.MaxUserEntries},
+		{"auth.rbac.cache.max_permission_entries", cacheCfg.MaxPermissionEntries},
+	}
+	for _, f := range entryFields {
+		if f.value <= 0 {
+			return fmt.Errorf("invalid %s %d: must be positive when RBAC is enabled", f.name, f.value)
+		}
+	}
+
+	return nil
+}
+
+// validateLog validates logging configuration.
+func (c *Config) validateLog() error {
 	// Validate log.level.
 	level := strings.ToLower(strings.TrimSpace(c.Log.Level))
 	switch level {
@@ -427,42 +584,4 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
-}
-
-// CountSecretClasses counts how many character classes (lowercase, uppercase,
-// digit, symbol) are present in the given secret string.
-func CountSecretClasses(secret string) int {
-	hasLower := false
-	hasUpper := false
-	hasDigit := false
-	hasSymbol := false
-
-	for _, r := range secret {
-		switch {
-		case unicode.IsLower(r):
-			hasLower = true
-		case unicode.IsUpper(r):
-			hasUpper = true
-		case unicode.IsDigit(r):
-			hasDigit = true
-		default:
-			hasSymbol = true
-		}
-	}
-
-	classes := 0
-	if hasLower {
-		classes++
-	}
-	if hasUpper {
-		classes++
-	}
-	if hasDigit {
-		classes++
-	}
-	if hasSymbol {
-		classes++
-	}
-
-	return classes
 }

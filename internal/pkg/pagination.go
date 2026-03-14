@@ -15,6 +15,7 @@ import (
 
 const (
 	defaultPage     = 1
+	maxPage         = 10000
 	defaultPageSize = 20
 	maxPageSize     = 100
 	defaultSort     = "id:desc"
@@ -40,6 +41,9 @@ func ParsePageRequest(c *gin.Context) domain.PageRequest {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", strconv.Itoa(defaultPage)))
 	if page < 1 {
 		page = defaultPage
+	}
+	if page > maxPage {
+		page = maxPage
 	}
 
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", strconv.Itoa(defaultPageSize)))
@@ -148,6 +152,18 @@ func isAllowed(field string, allowed []string) bool {
 type ListOptions struct {
 	SortFields   []string
 	FilterFields []string
+}
+
+// ToPageResult converts a pagination.Pagination result into a domain.PageResult,
+// eliminating repetitive field-by-field mapping in every repository.
+func ToPageResult[T any](p *pagination.Pagination[T]) *domain.PageResult[T] {
+	return &domain.PageResult[T]{
+		Items:       p.Items,
+		TotalItems:  p.TotalItems,
+		TotalPages:  p.TotalPages,
+		CurrentPage: p.CurrentPage,
+		PageSize:    p.ItemsPerPage,
+	}
 }
 
 // PaginateGORM executes a paginated GORM query using the simp-lee/pagination library.

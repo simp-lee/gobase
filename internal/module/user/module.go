@@ -30,10 +30,12 @@ func (m *UserModule) RegisterRoutes(api *gin.RouterGroup, pages *gin.RouterGroup
 	api.DELETE("/users/:id", m.handler.Delete)
 
 	// Page routes
-	pages.GET("/users", m.pageHandler.ListPage)
-	pages.GET("/users/new", m.pageHandler.NewPage)
-	pages.GET("/users/:id/edit", m.pageHandler.EditPage)
-	pages.POST("/users", m.pageHandler.CreateHTMX)
-	pages.PUT("/users/:id", m.pageHandler.UpdateHTMX)
-	pages.DELETE("/users/:id", m.pageHandler.DeleteHTMX)
+	if pages != nil {
+		pages.GET("/users", m.pageHandler.ListPage)
+		pages.GET("/users/new", m.pageHandler.NewPage)
+		pages.GET("/users/:id/edit", m.pageHandler.EditPage)
+		pages.POST("/users", m.pageHandler.CreateHTMX)
+		pages.PUT("/users/:id", m.pageHandler.UpdateHTMX)
+		pages.DELETE("/users/:id", m.pageHandler.DeleteHTMX)
+	}
 }

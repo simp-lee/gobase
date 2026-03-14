@@ -1,10 +1,11 @@
 {{ define "pagination" }}
 {{ if gt .Pagination.TotalPages 1 }}
+{{ $filterQuery := .FilterQuery }}
 <nav aria-label="分页导航" class="flex items-center justify-center mt-8 space-x-1">
     {{/* Previous button */}}
     {{ if .Pagination.HasPreviousPage }}
-    <a href="{{ .BaseURL }}?page={{ .Pagination.PreviousPage }}&page_size={{ .Pagination.ItemsPerPage }}"
-       hx-get="{{ .BaseURL }}?page={{ .Pagination.PreviousPage }}&page_size={{ .Pagination.ItemsPerPage }}"
+    <a href="{{ urlWithQuery .BaseURL (printf "page=%d&page_size=%d%s" .Pagination.PreviousPage .Pagination.ItemsPerPage $filterQuery) }}"
+       hx-get="{{ .BaseURL }}?page={{ .Pagination.PreviousPage }}&page_size={{ .Pagination.ItemsPerPage }}{{ $filterQuery }}"
        hx-target="#content"
        hx-swap="innerHTML"
        class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-indigo-600 transition-colors duration-200">
@@ -24,8 +25,8 @@
 
     {{/* Leading ellipsis */}}
     {{ if gt .Pagination.FirstPageInRange .Pagination.FirstPage }}
-    <a href="{{ .BaseURL }}?page={{ .Pagination.FirstPage }}&page_size={{ .Pagination.ItemsPerPage }}"
-       hx-get="{{ .BaseURL }}?page={{ .Pagination.FirstPage }}&page_size={{ .Pagination.ItemsPerPage }}"
+    <a href="{{ urlWithQuery .BaseURL (printf "page=%d&page_size=%d%s" .Pagination.FirstPage .Pagination.ItemsPerPage $filterQuery) }}"
+       hx-get="{{ .BaseURL }}?page={{ .Pagination.FirstPage }}&page_size={{ .Pagination.ItemsPerPage }}{{ $filterQuery }}"
        hx-target="#content"
        hx-swap="innerHTML"
        class="inline-flex items-center justify-center w-10 h-10 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-indigo-600 transition-colors duration-200">
@@ -40,14 +41,15 @@
     {{ $currentPage := .Pagination.CurrentPage }}
     {{ $baseURL := .BaseURL }}
     {{ $pageSize := .Pagination.ItemsPerPage }}
+    {{ $fq := $filterQuery }}
     {{ range $p := .Pagination.Pages }}
     {{ if eq $p $currentPage }}
     <span class="inline-flex items-center justify-center w-10 h-10 text-sm font-bold text-white bg-indigo-600 rounded-lg shadow-sm select-none">
         {{ $p }}
     </span>
     {{ else }}
-    <a href="{{ $baseURL }}?page={{ $p }}&page_size={{ $pageSize }}"
-       hx-get="{{ $baseURL }}?page={{ $p }}&page_size={{ $pageSize }}"
+    <a href="{{ urlWithQuery $baseURL (printf "page=%d&page_size=%d%s" $p $pageSize $fq) }}"
+       hx-get="{{ $baseURL }}?page={{ $p }}&page_size={{ $pageSize }}{{ $fq }}"
        hx-target="#content"
        hx-swap="innerHTML"
        class="inline-flex items-center justify-center w-10 h-10 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-indigo-600 transition-colors duration-200">
@@ -61,8 +63,8 @@
     {{ if lt (add .Pagination.LastPageInRange 1) .Pagination.LastPage }}
     <span class="inline-flex items-center justify-center w-10 h-10 text-sm text-gray-400 select-none">&hellip;</span>
     {{ end }}
-    <a href="{{ .BaseURL }}?page={{ .Pagination.LastPage }}&page_size={{ .Pagination.ItemsPerPage }}"
-       hx-get="{{ .BaseURL }}?page={{ .Pagination.LastPage }}&page_size={{ .Pagination.ItemsPerPage }}"
+    <a href="{{ urlWithQuery .BaseURL (printf "page=%d&page_size=%d%s" .Pagination.LastPage .Pagination.ItemsPerPage $filterQuery) }}"
+       hx-get="{{ .BaseURL }}?page={{ .Pagination.LastPage }}&page_size={{ .Pagination.ItemsPerPage }}{{ $filterQuery }}"
        hx-target="#content"
        hx-swap="innerHTML"
        class="inline-flex items-center justify-center w-10 h-10 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-indigo-600 transition-colors duration-200">
@@ -72,8 +74,8 @@
 
     {{/* Next button */}}
     {{ if .Pagination.HasNextPage }}
-    <a href="{{ .BaseURL }}?page={{ .Pagination.NextPage }}&page_size={{ .Pagination.ItemsPerPage }}"
-       hx-get="{{ .BaseURL }}?page={{ .Pagination.NextPage }}&page_size={{ .Pagination.ItemsPerPage }}"
+    <a href="{{ urlWithQuery .BaseURL (printf "page=%d&page_size=%d%s" .Pagination.NextPage .Pagination.ItemsPerPage $filterQuery) }}"
+       hx-get="{{ .BaseURL }}?page={{ .Pagination.NextPage }}&page_size={{ .Pagination.ItemsPerPage }}{{ $filterQuery }}"
        hx-target="#content"
        hx-swap="innerHTML"
        class="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-indigo-600 transition-colors duration-200">

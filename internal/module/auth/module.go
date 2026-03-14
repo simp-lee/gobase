@@ -16,9 +16,16 @@ func NewModule(h *AuthHandler) *AuthModule {
 	return &AuthModule{handler: h}
 }
 
-// RegisterRoutes registers auth API routes.
+// RegisterRoutes registers auth API and page routes.
 func (m *AuthModule) RegisterRoutes(api *gin.RouterGroup, pages *gin.RouterGroup) {
 	auth := api.Group("/auth")
 	auth.POST("/login", m.handler.Login)
 	auth.POST("/register", m.handler.Register)
+	auth.POST("/logout", m.handler.Logout)
+	auth.POST("/refresh", m.handler.RefreshToken)
+
+	if pages != nil {
+		pages.GET("/login", m.handler.LoginPage)
+		pages.GET("/register", m.handler.RegisterPage)
+	}
 }

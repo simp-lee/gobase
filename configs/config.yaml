@@ -50,10 +50,12 @@ database:
     max_idle_conns: 10
     max_open_conns: 100
     conn_max_lifetime: "1h"      # time.Duration 格式
+    conn_max_idle_time: "10m"    # max idle time before a connection is closed
 auth:
-  enabled: false
-  jwt_secret: ""
+  enabled: true
+  jwt_secret: "DebugJWTSecret-ForLocalDev-12345!"
   token_expiry: "24h"
+  cookie_secure: false           # 是否强制认证 Cookie 仅在 HTTPS 发送（生产建议/默认 true）
   public_paths:
     - "/api/v1/auth/login"
     - "/api/v1/auth/register"

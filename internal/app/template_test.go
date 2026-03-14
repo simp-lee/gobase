@@ -57,6 +57,8 @@ func testFSWithFuncs() fstest.MapFS {
 				`safe:{{ dangerouslySetInnerHTML .HTML }}|` +
 				`add:{{ add 3 4 }}|` +
 				`sub:{{ sub 10 3 }}|` +
+				`subtract:{{ subtract 10 3 }}|` +
+				`percent:{{ percent 50 200 }}|` +
 				`seq:{{ range seq 1 3 }}{{ . }}{{ end }}` +
 				`{{ end }}`),
 	}
@@ -110,12 +112,32 @@ func TestTemplateFuncMap(t *testing.T) {
 		}
 	})
 
-	t.Run("dangerouslySetInnerHTML", func(t *testing.T) {
+	t.Run("dangerouslySetInnerHTML_safe_tag", func(t *testing.T) {
 		fn := fm["dangerouslySetInnerHTML"].(func(string) template.HTML)
 		got := fn("<b>bold</b>")
 		want := template.HTML("<b>bold</b>")
 		if got != want {
 			t.Errorf("dangerouslySetInnerHTML() = %q; want %q", got, want)
+		}
+	})
+
+	t.Run("dangerouslySetInnerHTML_strips_script", func(t *testing.T) {
+		fn := fm["dangerouslySetInnerHTML"].(func(string) template.HTML)
+		got := fn(`<p>hello</p><script>alert("xss")</script>`)
+		if strings.Contains(string(got), "<script") {
+			t.Errorf("dangerouslySetInnerHTML should strip <script> tags, got %q", got)
+		}
+		if !strings.Contains(string(got), "<p>hello</p>") {
+			t.Errorf("dangerouslySetInnerHTML should preserve safe tags, got %q", got)
+		}
+	})
+
+	t.Run("urlWithQuery", func(t *testing.T) {
+		fn := fm["urlWithQuery"].(func(string, string) template.URL)
+		got := fn("/users", "page=2&page_size=1&sort=status%3Aasc&status=active")
+		want := template.URL("/users?page=2&page_size=1&sort=status%3Aasc&status=active")
+		if got != want {
+			t.Errorf("urlWithQuery() = %q; want %q", got, want)
 		}
 	})
 
@@ -130,6 +152,27 @@ func TestTemplateFuncMap(t *testing.T) {
 		fn := fm["sub"].(func(int, int) int)
 		if got := fn(10, 3); got != 7 {
 			t.Errorf("sub(10,3) = %d; want 7", got)
+		}
+	})
+
+	t.Run("subtract_alias", func(t *testing.T) {
+		fn := fm["subtract"].(func(int, int) int)
+		if got := fn(10, 3); got != 7 {
+			t.Errorf("subtract(10,3) = %d; want 7", got)
+		}
+	})
+
+	t.Run("percent", func(t *testing.T) {
+		fn := fm["percent"].(func(int, int) int)
+		if got := fn(50, 200); got != 25 {
+			t.Errorf("percent(50,200) = %d; want 25", got)
+		}
+	})
+
+	t.Run("percent_zero_total", func(t *testing.T) {
+		fn := fm["percent"].(func(int, int) int)
+		if got := fn(10, 0); got != 0 {
+			t.Errorf("percent(10,0) = %d; want 0", got)
 		}
 	})
 
@@ -291,11 +334,46 @@ func TestTemplateRenderer_Instance_WithFuncMap(t *testing.T) {
 		"safe:<em>hello</em>",
 		"add:7",
 		"sub:7",
+		"subtract:7",
+		"percent:25",
 		"seq:123",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q:\n%s", want, body)
 		}
+	}
+}
+
+// TestTemplateRenderer_RenderSanitizesScript verifies that <script> tags are
+// stripped when HTML content passes through dangerouslySetInnerHTML during
+// actual template rendering (end-to-end, not just the function).
+func TestTemplateRenderer_RenderSanitizesScript(t *testing.T) {
+	mfs := testFS()
+	mfs["templates/sanitize/page.html"] = &fstest.MapFile{
+		Data: []byte(
+			`{{ template "base" . }}` +
+				`{{ define "content" }}{{ dangerouslySetInnerHTML .HTML }}{{ end }}`),
+	}
+	r, err := NewTemplateRenderer(mfs, false)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	data := map[string]any{
+		"HTML": `<p>Safe paragraph</p><script>alert("xss")</script>`,
+	}
+	inst := r.Instance("sanitize/page.html", data)
+	w := httptest.NewRecorder()
+	if err := inst.Render(w); err != nil {
+		t.Fatalf("Render() error: %v", err)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "<p>Safe paragraph</p>") {
+		t.Errorf("rendered output should preserve safe HTML content:\n%s", body)
+	}
+	if strings.Contains(body, "<script") || strings.Contains(body, "alert") {
+		t.Errorf("rendered output should not contain <script> tags or script content:\n%s", body)
 	}
 }
 
@@ -346,6 +424,52 @@ func TestPaginationTemplate_UsesPagesRange(t *testing.T) {
 	}
 }
 
+func TestPaginationTemplate_DoesNotDoubleEncodeFallbackLinks(t *testing.T) {
+	r, err := NewTemplateRenderer(web.EmbeddedFS, false)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	data := map[string]any{
+		"Users":           []any{},
+		"BaseURL":         "/users",
+		"PageSize":        1,
+		"FilterQuery":     "&sort=status%3Aasc&status=active",
+		"StatusSortQuery": "page=1&page_size=1&sort=status%3Adesc&status=active",
+		"StatusSortDirection": "asc",
+		"Pagination": &pagination.Pagination[any]{
+			CurrentPage:      1,
+			ItemsPerPage:     1,
+			TotalPages:       2,
+			NextPage:         intPtr(2),
+			FirstPage:        1,
+			LastPage:         2,
+			FirstPageInRange: 1,
+			LastPageInRange:  2,
+			Pages:            []int{1, 2},
+		},
+	}
+
+	inst := r.Instance("user/list.html", data)
+	w := httptest.NewRecorder()
+	if err := inst.Render(w); err != nil {
+		t.Fatalf("Render() error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "page%3d1") || strings.Contains(body, "page_size%3d1") {
+		t.Fatalf("expected fallback href links to avoid double-encoded query separators, got %q", body)
+	}
+	for _, want := range []string{
+		"href=\"/users?page=1&amp;page_size=1&amp;sort=status%3Adesc&amp;status=active\"",
+		"href=\"/users?page=2&amp;page_size=1&amp;sort=status%3Aasc&amp;status=active\"",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q", want)
+		}
+	}
+}
+
 func TestPaginationTemplate_HidesNavigationWhenSinglePage(t *testing.T) {
 	r, err := NewTemplateRenderer(web.EmbeddedFS, false)
 	if err != nil {
@@ -377,8 +501,233 @@ func TestPaginationTemplate_HidesNavigationWhenSinglePage(t *testing.T) {
 	}
 }
 
+func TestTemplateRenderer_Regression_BaseBlocksAndCSRFScript(t *testing.T) {
+	r, err := NewTemplateRenderer(web.EmbeddedFS, false)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	t.Run("home_includes_nav_csrf_meta_and_htmx_csrf_script", func(t *testing.T) {
+		inst := r.Instance("home.html", map[string]any{"CSRFToken": "test-csrf-token"})
+		w := httptest.NewRecorder()
+		if err := inst.Render(w); err != nil {
+			t.Fatalf("Render() error: %v", err)
+		}
+
+		body := w.Body.String()
+		for _, want := range []string{
+			"<nav",
+			`<meta name="csrf-token"`,
+			"resolveCSRFToken",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("body missing %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("login_overrides_nav_and_hides_nav_html", func(t *testing.T) {
+		inst := r.Instance("auth/login.html", map[string]any{"CSRFToken": "test-csrf-token"})
+		w := httptest.NewRecorder()
+		if err := inst.Render(w); err != nil {
+			t.Fatalf("Render() error: %v", err)
+		}
+
+		body := w.Body.String()
+		if strings.Contains(body, "<nav") {
+			t.Errorf("login page should not render nav HTML:\n%s", body)
+		}
+	})
+
+	t.Run("page_can_override_head_and_scripts_blocks", func(t *testing.T) {
+		realBase, err := web.EmbeddedFS.ReadFile("templates/layouts/base.html")
+		if err != nil {
+			t.Fatalf("read real base template error: %v", err)
+		}
+		for _, want := range []string{`block "head"`, `block "scripts"`} {
+			if !strings.Contains(string(realBase), want) {
+				t.Fatalf("real base template missing %q", want)
+			}
+		}
+
+		realNav, err := web.EmbeddedFS.ReadFile("templates/partials/nav.html")
+		if err != nil {
+			t.Fatalf("read real nav partial error: %v", err)
+		}
+		realScriptsCommon, err := web.EmbeddedFS.ReadFile("templates/partials/scripts_common.html")
+		if err != nil {
+			t.Fatalf("read real scripts common partial error: %v", err)
+		}
+
+		overrideFS := fstest.MapFS{
+			"templates/layouts/base.html": &fstest.MapFile{
+				Data: realBase,
+			},
+			"templates/partials/nav.html": &fstest.MapFile{
+				Data: realNav,
+			},
+			"templates/partials/scripts_common.html": &fstest.MapFile{
+				Data: realScriptsCommon,
+			},
+			"templates/custom/override.html": &fstest.MapFile{
+				Data: []byte(
+					`{{ template "base" . }}` +
+						`{{ define "head" }}<meta name="x-head" content="override">{{ end }}` +
+						`{{ define "content" }}<h1>Override</h1>{{ end }}` +
+						`{{ define "scripts" }}<script>window.__scripts_override__=true;</script>{{ end }}`),
+			},
+		}
+
+		r2, err := NewTemplateRenderer(overrideFS, false)
+		if err != nil {
+			t.Fatalf("NewTemplateRenderer() error: %v", err)
+		}
+
+		inst := r2.Instance("custom/override.html", nil)
+		w := httptest.NewRecorder()
+		if err := inst.Render(w); err != nil {
+			t.Fatalf("Render() error: %v", err)
+		}
+
+		body := w.Body.String()
+		for _, want := range []string{
+			`<meta name="x-head" content="override">`,
+			`<script>window.__scripts_override__=true;</script>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("body missing %q:\n%s", want, body)
+			}
+		}
+	})
+}
+
 func intPtr(v int) *int {
 	return &v
+}
+
+// ---------------------------------------------------------------------------
+// Fragment template tests
+// ---------------------------------------------------------------------------
+
+// testFSWithFragments returns a test filesystem that includes a fragment template.
+// The fragment can be referenced by page templates AND rendered independently.
+func testFSWithFragments() fstest.MapFS {
+	base := testFS()
+	// A fragment template: named *_fragment.html
+	base["templates/user/row_fragment.html"] = &fstest.MapFile{
+		Data: []byte(`<tr><td>{{ .Name }}</td></tr>`),
+	}
+	// A page template that references the fragment via {{ template }}
+	base["templates/user/detail.html"] = &fstest.MapFile{
+		Data: []byte(
+			`{{ template "base" . }}` +
+				`{{ define "content" }}<div>{{ template "user/row_fragment.html" . }}</div>{{ end }}`),
+	}
+	return base
+}
+
+func TestFragmentTemplates_StandaloneRender(t *testing.T) {
+	r, err := NewTemplateRenderer(testFSWithFragments(), false)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	// Fragment should be renderable as a standalone template.
+	inst := r.Instance("user/row_fragment.html", map[string]any{"Name": "Alice"})
+	w := httptest.NewRecorder()
+	if err := inst.Render(w); err != nil {
+		t.Fatalf("Render() error: %v", err)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "<tr><td>Alice</td></tr>") {
+		t.Errorf("fragment standalone render missing expected content:\n%s", body)
+	}
+}
+
+func TestFragmentTemplates_ReferencedByPage(t *testing.T) {
+	r, err := NewTemplateRenderer(testFSWithFragments(), false)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	// Page template that includes the fragment.
+	inst := r.Instance("user/detail.html", map[string]any{"Name": "Bob"})
+	w := httptest.NewRecorder()
+	if err := inst.Render(w); err != nil {
+		t.Fatalf("Render() error: %v", err)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "<tr><td>Bob</td></tr>") {
+		t.Errorf("page template should include fragment content:\n%s", body)
+	}
+	if !strings.Contains(body, "<!DOCTYPE html>") {
+		t.Errorf("page template should still use base layout:\n%s", body)
+	}
+}
+
+func TestFragmentTemplates_DebugMode(t *testing.T) {
+	r, err := NewTemplateRenderer(testFSWithFragments(), true)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	// Fragment standalone in debug mode.
+	inst := r.Instance("user/row_fragment.html", map[string]any{"Name": "Carol"})
+	w := httptest.NewRecorder()
+	if err := inst.Render(w); err != nil {
+		t.Fatalf("Render() error: %v", err)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "<tr><td>Carol</td></tr>") {
+		t.Errorf("fragment standalone render (debug) missing expected content:\n%s", body)
+	}
+}
+
+func TestFragmentTemplates_NonSuffixFragmentNameNotClassifiedAsFragment(t *testing.T) {
+	mfs := testFS()
+	// Contains `_fragment` but does not follow the *_fragment.html convention.
+	mfs["templates/user/not_fragment_page.html"] = &fstest.MapFile{
+		Data: []byte(`<span>Not a fragment include target</span>`),
+	}
+	mfs["templates/user/consumer.html"] = &fstest.MapFile{
+		Data: []byte(
+			`{{ template "base" . }}` +
+				`{{ define "content" }}{{ template "user/not_fragment_page.html" . }}{{ end }}`),
+	}
+
+	r, err := NewTemplateRenderer(mfs, false)
+	if err != nil {
+		t.Fatalf("NewTemplateRenderer() error: %v", err)
+	}
+
+	inst := r.Instance("user/consumer.html", nil)
+	w := httptest.NewRecorder()
+	err = inst.Render(w)
+	if err == nil {
+		t.Fatal("Render() should fail when non-fragment page is referenced as fragment include")
+	}
+	if !strings.Contains(err.Error(), "user/not_fragment_page.html") {
+		t.Fatalf("error = %q, want to mention missing template", err.Error())
+	}
+}
+
+func TestDiscoverPageTemplates_IncludesFragments(t *testing.T) {
+	r := &TemplateRenderer{fs: testFSWithFragments()}
+	pages, err := r.discoverPageTemplates()
+	if err != nil {
+		t.Fatalf("discoverPageTemplates() error: %v", err)
+	}
+
+	found := false
+	for _, p := range pages {
+		if p == "templates/user/row_fragment.html" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("discoverPageTemplates should include fragment templates")
+	}
 }
 
 // ---------------------------------------------------------------------------

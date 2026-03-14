@@ -9,12 +9,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/simp-lee/pagination"
 
 	"github.com/simp-lee/gobase/internal/domain"
 )
@@ -30,20 +33,24 @@ type mockUserService struct {
 	listErr   error
 	updateErr error
 	deleteErr error
+	// captures the most recent ListUsers request for assertion
+	lastListReq domain.PageRequest
 }
 
 func newMockService() *mockUserService {
 	return &mockUserService{users: make(map[uint]*domain.User), nextID: 1}
 }
 
-func (m *mockUserService) CreateUser(_ context.Context, name, email string) (*domain.User, error) {
+func (m *mockUserService) CreateUser(_ context.Context, username, email string) (*domain.User, error) {
 	if m.createErr != nil {
 		return nil, m.createErr
 	}
 	u := &domain.User{
 		BaseModel: domain.BaseModel{ID: m.nextID},
-		Name:      name,
+		Username:  username,
 		Email:     email,
+		Role:      domain.RoleUser,
+		Status:    domain.StatusActive,
 	}
 	m.users[u.ID] = u
 	m.nextID++
@@ -61,7 +68,8 @@ func (m *mockUserService) GetUser(_ context.Context, id uint) (*domain.User, err
 	return u, nil
 }
 
-func (m *mockUserService) ListUsers(_ context.Context, req domain.PageRequest) (*pagination.Pagination[domain.User], error) {
+func (m *mockUserService) ListUsers(_ context.Context, req domain.PageRequest) (*domain.PageResult[domain.User], error) {
+	m.lastListReq = req
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
@@ -69,16 +77,24 @@ func (m *mockUserService) ListUsers(_ context.Context, req domain.PageRequest) (
 	for _, u := range m.users {
 		items = append(items, *u)
 	}
-	return &pagination.Pagination[domain.User]{
-		Items:        items,
-		TotalItems:   int64(len(items)),
-		CurrentPage:  req.Page,
-		ItemsPerPage: req.PageSize,
-		TotalPages:   1,
+	return &domain.PageResult[domain.User]{
+		Items:       items,
+		TotalItems:  int64(len(items)),
+		CurrentPage: req.Page,
+		PageSize:    req.PageSize,
+		TotalPages:  1,
 	}, nil
 }
 
-func (m *mockUserService) UpdateUser(_ context.Context, id uint, name, email string) (*domain.User, error) {
+func (m *mockUserService) UpdateUser(ctx context.Context, id uint, username, email, role, status string) (*domain.User, error) {
+	// Mirror production semantics: non-admin callers have admin-only fields
+	// silently ignored rather than rejected.
+	if role != "" && !isAdminFieldAuthorized(ctx) {
+		role = ""
+	}
+	if status != "" && !isAdminFieldAuthorized(ctx) {
+		status = ""
+	}
 	if m.updateErr != nil {
 		return nil, m.updateErr
 	}
@@ -86,8 +102,14 @@ func (m *mockUserService) UpdateUser(_ context.Context, id uint, name, email str
 	if !ok {
 		return nil, domain.ErrNotFound
 	}
-	u.Name = name
+	u.Username = username
 	u.Email = email
+	if role != "" {
+		u.Role = role
+	}
+	if status != "" {
+		u.Status = status
+	}
 	return u, nil
 }
 
@@ -110,10 +132,17 @@ func (m *mockUserService) DeleteUser(_ context.Context, id uint) error {
 func setupTestRouter(h *UserPageHandler) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		if role := c.GetHeader("X-Test-Role"); role != "" {
+			c.Set("role", role)
+		}
+		c.Next()
+	})
 
 	// Stub templates so c.HTML() calls don't panic.
 	tmpl := template.Must(template.New("").Parse(
-		`{{define "user/list.html"}}list:BaseURL={{.BaseURL}}:HasPagination={{if .Pagination}}yes{{else}}no{{end}}{{end}}` +
+		`{{define "user/list.html"}}list:BaseURL={{.BaseURL}}:HasPagination={{if .Pagination}}yes{{else}}no{{end}}:StatusFilter={{.StatusFilter}}:FilterQuery={{.FilterQuery}}:StatusSortQuery={{.StatusSortQuery}}:StatusSortDirection={{.StatusSortDirection}}:FlashSuccess={{if .Flash}}{{.Flash.Success}}{{end}}{{end}}` +
+			`{{define "user/list_fragment.html"}}fragment:BaseURL={{.BaseURL}}:HasPagination={{if .Pagination}}yes{{else}}no{{end}}:StatusFilter={{.StatusFilter}}:FilterQuery={{.FilterQuery}}:StatusSortQuery={{.StatusSortQuery}}:StatusSortDirection={{.StatusSortDirection}}:FlashSuccess={{if .Flash}}{{.Flash.Success}}{{end}}{{end}}` +
 			`{{define "user/form.html"}}form{{if .Error}}:{{.Error}}{{end}}{{end}}` +
 			`{{define "errors/400.html"}}400{{end}}` +
 			`{{define "errors/404.html"}}404{{end}}` +
@@ -132,6 +161,46 @@ func setupTestRouter(h *UserPageHandler) *gin.Engine {
 	return r
 }
 
+func setupTestRouterWithRealTemplates(t *testing.T, h *UserPageHandler) *gin.Engine {
+	t.Helper()
+	r := setupTestRouter(h)
+	r.SetHTMLTemplate(loadRealUserFormTemplate(t))
+	return r
+}
+
+func loadRealUserFormTemplate(t *testing.T) *template.Template {
+	t.Helper()
+
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to resolve current file path")
+	}
+
+	templatesRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", "..", "..", "web", "templates"))
+	files := []struct {
+		name string
+		path string
+	}{
+		{name: "templates/layouts/base.html", path: filepath.Join(templatesRoot, "layouts", "base.html")},
+		{name: "templates/partials/nav.html", path: filepath.Join(templatesRoot, "partials", "nav.html")},
+		{name: "templates/partials/scripts_common.html", path: filepath.Join(templatesRoot, "partials", "scripts_common.html")},
+		{name: "user/form.html", path: filepath.Join(templatesRoot, "user", "form.html")},
+	}
+
+	tmpl := template.New("")
+	for _, f := range files {
+		content, err := os.ReadFile(f.path)
+		if err != nil {
+			t.Fatalf("failed to read template %s: %v", f.path, err)
+		}
+		if _, err := tmpl.New(f.name).Parse(string(content)); err != nil {
+			t.Fatalf("failed to parse template %s: %v", f.path, err)
+		}
+	}
+
+	return tmpl
+}
+
 // --- tests ---
 
 func TestNewUserPageHandler(t *testing.T) {
@@ -147,8 +216,8 @@ func TestNewUserPageHandler(t *testing.T) {
 
 func TestListPage_Success(t *testing.T) {
 	svc := newMockService()
-	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Alice", Email: "alice@example.com"}
-	svc.users[2] = &domain.User{BaseModel: domain.BaseModel{ID: 2}, Name: "Bob", Email: "bob@example.com"}
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Alice", Email: "alice@example.com"}
+	svc.users[2] = &domain.User{BaseModel: domain.BaseModel{ID: 2}, Username: "Bob", Email: "bob@example.com"}
 	h := NewUserPageHandler(svc)
 	r := setupTestRouter(h)
 
@@ -195,7 +264,7 @@ func TestCreateHTMX_Success(t *testing.T) {
 	r := setupTestRouter(h)
 
 	form := url.Values{}
-	form.Set("name", "Alice")
+	form.Set("username", "Alice")
 	form.Set("email", "alice@example.com")
 
 	w := httptest.NewRecorder()
@@ -231,10 +300,35 @@ func TestCreateHTMX_Success(t *testing.T) {
 	if toast["message"] != "用户创建成功" {
 		t.Errorf("expected toast message '用户创建成功', got %q", toast["message"])
 	}
+	if cookies := w.Header().Values("Set-Cookie"); len(cookies) == 0 || !strings.Contains(strings.Join(cookies, "\n"), flashToastCookieName+"=") {
+		t.Fatalf("expected flash toast cookie to be set, got %v", cookies)
+	}
 
 	// Verify user was created in mock service.
 	if len(svc.users) != 1 {
 		t.Errorf("expected 1 user, got %d", len(svc.users))
+	}
+}
+
+func TestListPage_ConsumesFlashToastCookie(t *testing.T) {
+	svc := newMockService()
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users", nil)
+	req.AddCookie(&http.Cookie{Name: flashToastCookieName, Value: "success:%E7%94%A8%E6%88%B7%E5%88%9B%E5%BB%BA%E6%88%90%E5%8A%9F"})
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "FlashSuccess=用户创建成功") {
+		t.Fatalf("expected flash success in template data, got %q", body)
+	}
+	if cookies := w.Header().Values("Set-Cookie"); len(cookies) == 0 || !strings.Contains(strings.Join(cookies, "\n"), flashToastCookieName+"=;") {
+		t.Fatalf("expected flash toast cookie to be cleared, got %v", cookies)
 	}
 }
 
@@ -245,7 +339,7 @@ func TestCreateHTMX_ServiceError(t *testing.T) {
 	r := setupTestRouter(h)
 
 	form := url.Values{}
-	form.Set("name", "Bob")
+	form.Set("username", "Bob")
 	form.Set("email", "bob@example.com")
 
 	w := httptest.NewRecorder()
@@ -270,7 +364,7 @@ func TestCreateHTMX_InternalError(t *testing.T) {
 	r := setupTestRouter(h)
 
 	form := url.Values{}
-	form.Set("name", "Bob")
+	form.Set("username", "Bob")
 	form.Set("email", "bob@example.com")
 
 	w := httptest.NewRecorder()
@@ -289,13 +383,13 @@ func TestCreateHTMX_InternalError(t *testing.T) {
 
 func TestUpdateHTMX_ServiceError_RendersErrorMessage(t *testing.T) {
 	svc := newMockService()
-	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Old", Email: "old@example.com"}
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com"}
 	svc.updateErr = domain.NewAppError(domain.CodeAlreadyExists, "email already exists", nil)
 	h := NewUserPageHandler(svc)
 	r := setupTestRouter(h)
 
 	form := url.Values{}
-	form.Set("name", "Updated")
+	form.Set("username", "Updated")
 	form.Set("email", "updated@example.com")
 
 	w := httptest.NewRecorder()
@@ -316,13 +410,13 @@ func TestUpdateHTMX_ServiceError_RendersErrorMessage(t *testing.T) {
 
 func TestUpdateHTMX_InternalError(t *testing.T) {
 	svc := newMockService()
-	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Old", Email: "old@example.com"}
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com"}
 	svc.updateErr = domain.NewAppError(domain.CodeInternal, "db connection lost", nil)
 	h := NewUserPageHandler(svc)
 	r := setupTestRouter(h)
 
 	form := url.Values{}
-	form.Set("name", "Updated")
+	form.Set("username", "Updated")
 	form.Set("email", "updated@example.com")
 
 	w := httptest.NewRecorder()
@@ -344,12 +438,12 @@ func TestUpdateHTMX_InternalError(t *testing.T) {
 
 func TestUpdateHTMX_Success(t *testing.T) {
 	svc := newMockService()
-	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Old", Email: "old@example.com"}
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com"}
 	h := NewUserPageHandler(svc)
 	r := setupTestRouter(h)
 
 	form := url.Values{}
-	form.Set("name", "Updated")
+	form.Set("username", "Updated")
 	form.Set("email", "updated@example.com")
 
 	w := httptest.NewRecorder()
@@ -373,10 +467,201 @@ func TestUpdateHTMX_Success(t *testing.T) {
 	if triggerData["showToast"]["message"] != "用户更新成功" {
 		t.Errorf("expected toast message '用户更新成功', got %q", triggerData["showToast"]["message"])
 	}
+	if cookies := w.Header().Values("Set-Cookie"); len(cookies) == 0 || !strings.Contains(strings.Join(cookies, "\n"), flashToastCookieName+"=") {
+		t.Fatalf("expected flash toast cookie to be set, got %v", cookies)
+	}
 
 	// Verify the update was applied.
-	if svc.users[1].Name != "Updated" {
-		t.Errorf("expected name Updated, got %q", svc.users[1].Name)
+	if svc.users[1].Username != "Updated" {
+		t.Errorf("expected username Updated, got %q", svc.users[1].Username)
+	}
+}
+
+func TestUpdateHTMX_RoleAdminSuccess(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com", Role: domain.RoleUser}
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	form := url.Values{}
+	form.Set("username", "Updated")
+	form.Set("email", "updated@example.com")
+	form.Set("role", "admin")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPut, "/users/1", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Test-Role", "admin")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if svc.users[1].Role != domain.RoleAdmin {
+		t.Fatalf("expected role %q, got %q", domain.RoleAdmin, svc.users[1].Role)
+	}
+}
+
+func TestEditPage_RealTemplate_AdminShowsRoleField(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com", Role: domain.RoleUser}
+	h := NewUserPageHandler(svc)
+	r := setupTestRouterWithRealTemplates(t, h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users/1/edit", nil)
+	req.Header.Set("X-Test-Role", "admin")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "name=\"role\"") {
+		t.Fatalf("expected role field in admin edit form, got %q", body)
+	}
+	if !strings.Contains(body, "<option value=\"user\" selected>") {
+		t.Fatalf("expected current role option to be selected, got %q", body)
+	}
+}
+
+func TestEditPage_RealTemplate_NonAdminHidesRoleField(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com", Role: domain.RoleUser}
+	h := NewUserPageHandler(svc)
+	r := setupTestRouterWithRealTemplates(t, h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users/1/edit", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "name=\"role\"") {
+		t.Fatalf("expected role field to be hidden for non-admin edit form, got %q", body)
+	}
+}
+
+func TestEditPage_RealTemplate_AdminShowsStatusField(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com", Role: domain.RoleUser, Status: domain.StatusActive}
+	h := NewUserPageHandler(svc)
+	r := setupTestRouterWithRealTemplates(t, h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users/1/edit", nil)
+	req.Header.Set("X-Test-Role", "admin")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "name=\"status\"") {
+		t.Fatalf("expected status field in admin edit form, got %q", body)
+	}
+	if !strings.Contains(body, "<option value=\"active\" selected>") {
+		t.Fatalf("expected current status option to be selected, got %q", body)
+	}
+}
+
+func TestEditPage_RealTemplate_NonAdminHidesStatusField(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com", Role: domain.RoleUser, Status: domain.StatusActive}
+	h := NewUserPageHandler(svc)
+	r := setupTestRouterWithRealTemplates(t, h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users/1/edit", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "name=\"status\"") {
+		t.Fatalf("expected status field to be hidden for non-admin edit form, got %q", body)
+	}
+}
+
+func TestListPage_StatusFilterPassedToTemplate(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Alice", Email: "alice@example.com", Status: domain.StatusActive}
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users?status=active", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "StatusFilter=active") {
+		t.Errorf("expected StatusFilter=active in template data, got %q", body)
+	}
+	if !strings.Contains(body, "status=active") {
+		t.Errorf("expected FilterQuery to contain status=active, got %q", body)
+	}
+}
+
+func TestListPage_StatusSortLinkPassedToTemplate(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Alice", Email: "alice@example.com", Status: domain.StatusActive}
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users?page=2&page_size=15&status=active&sort=status:asc", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "StatusSortDirection=asc") {
+		t.Fatalf("expected StatusSortDirection=asc in template data, got %q", body)
+	}
+	if !strings.Contains(body, "StatusSortQuery=page=2&amp;page_size=15&amp;sort=status%3Adesc&amp;status=active") {
+		t.Fatalf("expected toggled status sort query in template data, got %q", body)
+	}
+}
+
+func TestListPage_HTMXRendersFragmentAndPushesURL(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Alice", Email: "alice@example.com", Status: domain.StatusActive}
+	h := NewUserPageHandler(svc)
+	r := setupTestRouter(h)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/users?page=2&page_size=1&status=active&sort=status:asc", nil)
+	req.Header.Set("HX-Request", "true")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if got := w.Header().Get("HX-Push-Url"); got != "/users?page=2&page_size=1&status=active&sort=status:asc" {
+		t.Fatalf("expected HX-Push-Url to match request URI, got %q", got)
+	}
+	body := w.Body.String()
+	if !strings.HasPrefix(body, "fragment:") {
+		t.Fatalf("expected fragment template body, got %q", body)
+	}
+	if strings.Contains(body, "list:") {
+		t.Fatalf("expected full-page template not to be used for HTMX requests, got %q", body)
+	}
+	if svc.lastListReq.Filter["status"] != domain.StatusActive {
+		t.Fatalf("expected status filter to be preserved, got %q", svc.lastListReq.Filter["status"])
+	}
+	if svc.lastListReq.Sort != "status:asc" {
+		t.Fatalf("expected sort to be preserved, got %q", svc.lastListReq.Sort)
+	}
+	if svc.lastListReq.Page != 2 || svc.lastListReq.PageSize != 1 {
+		t.Fatalf("expected pagination to be preserved, got page=%d page_size=%d", svc.lastListReq.Page, svc.lastListReq.PageSize)
 	}
 }
 
@@ -386,7 +671,7 @@ func TestUpdateHTMX_InvalidID(t *testing.T) {
 	r := setupTestRouter(h)
 
 	form := url.Values{}
-	form.Set("name", "Test")
+	form.Set("username", "Test")
 	form.Set("email", "test@example.com")
 
 	w := httptest.NewRecorder()
@@ -421,13 +706,13 @@ func TestEditPage_InvalidID(t *testing.T) {
 
 func TestUpdateHTMX_BindError_GetUserInternalError(t *testing.T) {
 	svc := newMockService()
-	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Old", Email: "old@example.com"}
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com"}
 	svc.getErr = errors.New("db connection lost")
 	h := NewUserPageHandler(svc)
 	r := setupTestRouter(h)
 
 	form := url.Values{}
-	form.Set("name", "A")
+	form.Set("username", "A")
 	form.Set("email", "not-an-email")
 
 	w := httptest.NewRecorder()
@@ -442,14 +727,14 @@ func TestUpdateHTMX_BindError_GetUserInternalError(t *testing.T) {
 
 func TestUpdateHTMX_UpdateError_GetUserInternalError(t *testing.T) {
 	svc := newMockService()
-	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Old", Email: "old@example.com"}
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Old", Email: "old@example.com"}
 	svc.updateErr = errors.New("update failed")
 	svc.getErr = errors.New("db connection lost")
 	h := NewUserPageHandler(svc)
 	r := setupTestRouter(h)
 
 	form := url.Values{}
-	form.Set("name", "Updated")
+	form.Set("username", "Updated")
 	form.Set("email", "updated@example.com")
 
 	w := httptest.NewRecorder()
@@ -464,7 +749,7 @@ func TestUpdateHTMX_UpdateError_GetUserInternalError(t *testing.T) {
 
 func TestDeleteHTMX_Success(t *testing.T) {
 	svc := newMockService()
-	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "ToDelete", Email: "del@example.com"}
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "ToDelete", Email: "del@example.com"}
 	h := NewUserPageHandler(svc)
 	r := setupTestRouter(h)
 
@@ -476,13 +761,24 @@ func TestDeleteHTMX_Success(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", w.Code)
 	}
 
-	trigger := w.Header().Get("HX-Trigger")
-	var triggerData map[string]map[string]string
-	if err := json.Unmarshal([]byte(trigger), &triggerData); err != nil {
-		t.Fatalf("failed to parse HX-Trigger: %v", err)
+	if got := w.Header().Get("HX-Reswap"); got != "delete" {
+		t.Fatalf("expected HX-Reswap delete for delete success, got %q", got)
 	}
-	if triggerData["showToast"]["message"] != "用户删除成功" {
-		t.Errorf("expected toast message '用户删除成功', got %q", triggerData["showToast"]["message"])
+
+	if got := w.Header().Get("HX-Trigger"); got != "" {
+		t.Fatalf("expected HX-Trigger to be empty for delete success, got %q", got)
+	}
+
+	if got := w.Header().Get("HX-Trigger-After-Settle"); got != "" {
+		t.Fatalf("expected HX-Trigger-After-Settle to be empty for delete success, got %q", got)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, `hx-swap-oob="beforeend:body"`) {
+		t.Fatalf("expected delete success body to include OOB swap, got %q", body)
+	}
+	if !strings.Contains(body, "用户删除成功") {
+		t.Fatalf("expected delete success body to include toast message, got %q", body)
 	}
 
 	// Verify user was removed.
@@ -561,7 +857,7 @@ func TestDeleteHTMX_InvalidID(t *testing.T) {
 
 func TestDeleteHTMX_InternalError(t *testing.T) {
 	svc := newMockService()
-	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Name: "Test", Email: "test@example.com"}
+	svc.users[1] = &domain.User{BaseModel: domain.BaseModel{ID: 1}, Username: "Test", Email: "test@example.com"}
 	svc.deleteErr = errors.New("db connection lost")
 	h := NewUserPageHandler(svc)
 	r := setupTestRouter(h)
@@ -685,6 +981,70 @@ func TestSetShowToastHeader(t *testing.T) {
 	}
 	if toast["type"] != "success" {
 		t.Errorf("expected type 'success', got %q", toast["type"])
+	}
+	for _, ch := range trigger {
+		if ch > 127 {
+			t.Fatalf("expected HX-Trigger header to remain ASCII-only, got %q", trigger)
+		}
+	}
+}
+
+func TestToUserPaginationView_NormalizesTotalPages(t *testing.T) {
+	view := toUserPaginationView(&domain.PageResult[domain.User]{
+		CurrentPage: 0,
+		PageSize:    10,
+		TotalPages:  0,
+	})
+
+	if view.TotalPages != 1 {
+		t.Fatalf("TotalPages=%d; want 1", view.TotalPages)
+	}
+	if view.LastPage != 1 {
+		t.Fatalf("LastPage=%d; want 1", view.LastPage)
+	}
+	if len(view.Pages) != 1 || view.Pages[0] != 1 {
+		t.Fatalf("Pages=%v; want [1]", view.Pages)
+	}
+}
+
+func TestToUserPaginationView_UsesWindowedPages(t *testing.T) {
+	view := toUserPaginationView(&domain.PageResult[domain.User]{
+		CurrentPage: 50,
+		PageSize:    20,
+		TotalPages:  100,
+	})
+
+	if view.FirstPageInRange != 48 {
+		t.Fatalf("FirstPageInRange=%d; want 48", view.FirstPageInRange)
+	}
+	if view.LastPageInRange != 52 {
+		t.Fatalf("LastPageInRange=%d; want 52", view.LastPageInRange)
+	}
+	wantPages := []int{48, 49, 50, 51, 52}
+	if !reflect.DeepEqual(view.Pages, wantPages) {
+		t.Fatalf("Pages=%v; want %v", view.Pages, wantPages)
+	}
+}
+
+func TestToUserPaginationView_ClampsCurrentPageToTotalPages(t *testing.T) {
+	view := toUserPaginationView(&domain.PageResult[domain.User]{
+		CurrentPage: 9,
+		PageSize:    20,
+		TotalPages:  3,
+	})
+
+	if view.CurrentPage != 3 {
+		t.Fatalf("CurrentPage=%d; want 3", view.CurrentPage)
+	}
+	if view.NextPage != 3 {
+		t.Fatalf("NextPage=%d; want 3", view.NextPage)
+	}
+	if view.HasNextPage {
+		t.Fatal("HasNextPage=true; want false")
+	}
+	wantPages := []int{1, 2, 3}
+	if !reflect.DeepEqual(view.Pages, wantPages) {
+		t.Fatalf("Pages=%v; want %v", view.Pages, wantPages)
 	}
 }
 

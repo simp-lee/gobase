@@ -18,7 +18,7 @@ var errorTemplates = map[int]string{
 
 // renderError sends an error response appropriate for the client.
 // For requests that accept HTML, it renders the corresponding error template
-// (falling back to errors/500.html for unmapped codes, then plain text if
+// (falling back to a generic status page for unmapped codes, then plain text if
 // template rendering panics). For other requests it returns a JSON envelope.
 func renderError(c *gin.Context, code int, message string) {
 	accept := strings.ToLower(c.GetHeader("Accept"))
@@ -31,15 +31,11 @@ func renderError(c *gin.Context, code int, message string) {
 		renderHTMLErrorPage(c, code)
 		return
 	}
-	c.JSON(code, pkg.Response{
-		Code:    code,
-		Message: message,
-		Data:    nil,
-	})
+	c.JSON(code, pkg.Response{Code: code, Message: message})
 }
 
 // renderHTMLErrorPage renders the error template for the given status code.
-// If no template exists for the code, it falls back to errors/500.html.
+// If no template exists for the code, it returns a generic HTML status page.
 // If rendering panics, it falls back to a plain text response.
 func renderHTMLErrorPage(c *gin.Context, code int) {
 	defer func() {
@@ -51,7 +47,10 @@ func renderHTMLErrorPage(c *gin.Context, code int) {
 
 	tmpl, ok := errorTemplates[code]
 	if !ok {
-		tmpl = errorTemplates[500]
+		statusText := defaultStatusText(code)
+		c.Data(code, "text/html; charset=utf-8",
+			[]byte(fmt.Sprintf("<!DOCTYPE html><html><body><h1>%d %s</h1></body></html>", code, statusText)))
+		return
 	}
 	c.HTML(code, tmpl, gin.H{})
 }

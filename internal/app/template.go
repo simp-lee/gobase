@@ -2,15 +2,25 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/render"
+	"github.com/microcosm-cc/bluemonday"
+
+	"github.com/simp-lee/gobase/web"
 )
+
+var htmlSanitizer = bluemonday.UGCPolicy()
 
 // TemplateRenderer is a custom Gin HTML renderer that supports layout + partial
 // template inheritance and dual-mode operation (debug / release).
@@ -22,8 +32,12 @@ import (
 // Template loading strategy:
 //  1. Load all layout templates   (templates/layouts/*.html)
 //  2. Load all partial templates  (templates/partials/*.html)
-//  3. For each page template, clone the base set (layouts + partials) and parse
-//     the page template on top, allowing the page to override blocks defined in layouts.
+//  3. Separate fragment templates (*_fragment.html) from regular pages and add
+//     them to the base set so they can be referenced via {{ template }} AND
+//     rendered independently as standalone targets.
+//  4. For each page template, clone the base set (layouts + partials + fragments)
+//     and parse the page template on top, allowing the page to override blocks
+//     defined in layouts.
 //
 // Page templates use {{ template "base" . }} to invoke the layout, and define
 // blocks ({{ define "title" }}, {{ define "content" }}, etc.) to inject content
@@ -111,7 +125,39 @@ func (r *TemplateRenderer) parseAllTemplates() (map[string]*template.Template, e
 		return nil, fmt.Errorf("glob partials: %w", err)
 	}
 
-	// Step 2: Build the base template set from layouts + partials.
+	// Step 2: Discover page templates (everything not in layouts/ or partials/).
+	pageFiles, err := r.discoverPageTemplates()
+	if err != nil {
+		return nil, fmt.Errorf("discover pages: %w", err)
+	}
+
+	// Step 2b: Separate fragment templates (e.g., *_fragment.html) from regular pages.
+	// Fragments are included in the base template set so they can be referenced
+	// by other page templates via {{ template "module/some_fragment.html" . }}.
+	var fragmentFiles []string
+	var regularPages []string
+	for _, pf := range pageFiles {
+		name := strings.TrimPrefix(pf, "templates/")
+		if strings.HasSuffix(name, "_fragment.html") {
+			fragmentFiles = append(fragmentFiles, pf)
+		} else {
+			regularPages = append(regularPages, pf)
+		}
+	}
+
+	// Step 3: Build the base template set from layouts + partials + fragments.
+	base, err := r.buildBaseTemplateSet(layoutFiles, partialFiles, fragmentFiles)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 4: For each page, clone base and parse the page template on top.
+	// Also register fragment templates as standalone pages so they can be rendered directly.
+	return r.cloneForPages(base, append(regularPages, fragmentFiles...))
+}
+
+// buildBaseTemplateSet creates the shared base template containing layouts, partials, and fragments.
+func (r *TemplateRenderer) buildBaseTemplateSet(layoutFiles, partialFiles, fragmentFiles []string) (*template.Template, error) {
 	base := template.New("").Funcs(r.funcMap)
 	baseFiles := append(layoutFiles, partialFiles...)
 	for _, f := range baseFiles {
@@ -123,14 +169,22 @@ func (r *TemplateRenderer) parseAllTemplates() (map[string]*template.Template, e
 			return nil, fmt.Errorf("parse %s: %w", f, err)
 		}
 	}
-
-	// Step 3: Discover page templates (everything not in layouts/ or partials/).
-	pageFiles, err := r.discoverPageTemplates()
-	if err != nil {
-		return nil, fmt.Errorf("discover pages: %w", err)
+	// Add fragment templates to the base set, keyed by their page-relative name.
+	for _, ff := range fragmentFiles {
+		content, err := fs.ReadFile(r.fs, ff)
+		if err != nil {
+			return nil, fmt.Errorf("read fragment %s: %w", ff, err)
+		}
+		name := strings.TrimPrefix(ff, "templates/")
+		if _, err := base.New(name).Parse(string(content)); err != nil {
+			return nil, fmt.Errorf("parse fragment %s: %w", ff, err)
+		}
 	}
+	return base, nil
+}
 
-	// Step 4: For each page, clone base and parse the page template on top.
+// cloneForPages creates a separate compiled template for each page by cloning the base and parsing the page on top.
+func (r *TemplateRenderer) cloneForPages(base *template.Template, pageFiles []string) (map[string]*template.Template, error) {
 	templates := make(map[string]*template.Template, len(pageFiles))
 	for _, pf := range pageFiles {
 		clone, err := base.Clone()
@@ -148,7 +202,6 @@ func (r *TemplateRenderer) parseAllTemplates() (map[string]*template.Template, e
 		}
 		templates[name] = clone
 	}
-
 	return templates, nil
 }
 
@@ -174,6 +227,9 @@ func (r *TemplateRenderer) discoverPageTemplates() ([]string, error) {
 	return pages, err
 }
 
+// subFn returns the difference of two integers (used as both "sub" and "subtract" template functions).
+var subFn = func(a, b int) int { return a - b }
+
 // templateFuncMap returns the default set of template helper functions.
 func templateFuncMap() template.FuncMap {
 	return template.FuncMap{
@@ -194,12 +250,28 @@ func templateFuncMap() template.FuncMap {
 		},
 
 		// dangerouslySetInnerHTML marks a string as safe HTML, bypassing
-		// html/template's auto-escaping. WARNING: This function MUST NEVER be
-		// used with user-supplied or untrusted data — doing so creates an XSS
-		// vulnerability. Only use it for trusted, developer-controlled HTML
-		// fragments (e.g., pre-rendered markdown from a build step).
+		// html/template's auto-escaping after applying server-side sanitization.
+		// NOTE: Keep this boundary strict to reduce XSS risk from imported/
+		// user-provided HTML content.
 		"dangerouslySetInnerHTML": func(s string) template.HTML {
-			return template.HTML(s)
+			return template.HTML(htmlSanitizer.Sanitize(s))
+		},
+
+		// urlWithQuery joins a server-built relative path and query string into a
+		// single safe URL so html/template does not percent-encode query separators
+		// inside href attributes.
+		"urlWithQuery": func(base, query string) template.URL {
+			if query == "" {
+				return template.URL(base)
+			}
+
+			trimmed := strings.TrimPrefix(query, "?")
+			separator := "?"
+			if strings.Contains(base, "?") {
+				separator = "&"
+			}
+
+			return template.URL(base + separator + trimmed)
 		},
 
 		// add returns the sum of two integers (useful for pagination: page + 1).
@@ -208,8 +280,17 @@ func templateFuncMap() template.FuncMap {
 		},
 
 		// sub returns the difference of two integers (useful for pagination: page - 1).
-		"sub": func(a, b int) int {
-			return a - b
+		// subtract is an alias for sub (used in book templates).
+		"sub": subFn,
+
+		"subtract": subFn,
+
+		// percent returns the integer percentage of a/b (0 if b is zero).
+		"percent": func(a, b int) int {
+			if b == 0 {
+				return 0
+			}
+			return a * 100 / b
 		},
 
 		// seq generates a slice of integers from start to end inclusive
@@ -225,6 +306,49 @@ func templateFuncMap() template.FuncMap {
 			return s
 		},
 	}
+}
+
+// setupTemplateRenderer resolves the template filesystem (live disk in debug
+// mode, embedded in release/test mode) and installs the renderer on the engine.
+func setupTemplateRenderer(engine *gin.Engine, mode string) error {
+	var fsys fs.FS
+	if mode == "debug" {
+		var err error
+		fsys, err = resolveDebugWebFS()
+		if err != nil {
+			return fmt.Errorf("resolve debug template fs: %w", err)
+		}
+	} else {
+		fsys = web.EmbeddedFS
+	}
+
+	renderer, err := NewTemplateRenderer(fsys, mode == "debug")
+	if err != nil {
+		return fmt.Errorf("setup template renderer: %w", err)
+	}
+	engine.HTMLRender = renderer
+	return nil
+}
+
+// resolveDebugWebFS locates the project's web/ directory on disk for
+// hot-reload template serving during development.
+func resolveDebugWebFS() (fs.FS, error) {
+	if _, file, _, ok := runtime.Caller(0); ok {
+		webDir := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "web"))
+		if stat, err := os.Stat(webDir); err == nil && stat.IsDir() {
+			return os.DirFS(webDir), nil
+		}
+	}
+
+	exePath, err := os.Executable()
+	if err == nil {
+		webDir := filepath.Join(filepath.Dir(exePath), "web")
+		if stat, err := os.Stat(webDir); err == nil && stat.IsDir() {
+			return os.DirFS(webDir), nil
+		}
+	}
+
+	return nil, errors.New("debug web directory not found")
 }
 
 // HTMLInstance implements gin's render.Render interface for a single template

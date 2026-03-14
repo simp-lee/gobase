@@ -5,8 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/simp-lee/pagination"
-
 	"github.com/simp-lee/gobase/internal/domain"
 )
 
@@ -52,17 +50,17 @@ func (m *mockUserRepo) GetByEmail(_ context.Context, email string) (*domain.User
 	return nil, domain.ErrNotFound
 }
 
-func (m *mockUserRepo) List(_ context.Context, req domain.PageRequest) (*pagination.Pagination[domain.User], error) {
+func (m *mockUserRepo) List(_ context.Context, req domain.PageRequest) (*domain.PageResult[domain.User], error) {
 	items := make([]domain.User, 0, len(m.users))
 	for _, u := range m.users {
 		items = append(items, *u)
 	}
-	return &pagination.Pagination[domain.User]{
-		Items:        items,
-		TotalItems:   int64(len(items)),
-		CurrentPage:  req.Page,
-		ItemsPerPage: req.PageSize,
-		TotalPages:   1,
+	return &domain.PageResult[domain.User]{
+		Items:       items,
+		TotalItems:  int64(len(items)),
+		CurrentPage: req.Page,
+		PageSize:    req.PageSize,
+		TotalPages:  1,
 	}, nil
 }
 
@@ -93,16 +91,16 @@ func (m *mockUserRepo) Delete(_ context.Context, id uint) error {
 func TestCreateUser(t *testing.T) {
 	tests := []struct {
 		name      string
-		userName  string
+		username  string
 		email     string
 		createErr error
 		wantErr   bool
 		errCode   int
 	}{
 		{"success", "Alice", "alice@example.com", nil, false, 0},
-		{"empty name", "", "a@b.com", nil, true, domain.CodeValidation},
-		{"whitespace name", "   ", "a@b.com", nil, true, domain.CodeValidation},
-		{"short name", "A", "a@b.com", nil, true, domain.CodeValidation},
+		{"empty username", "", "a@b.com", nil, true, domain.CodeValidation},
+		{"whitespace username", "   ", "a@b.com", nil, true, domain.CodeValidation},
+		{"short username", "A", "a@b.com", nil, true, domain.CodeValidation},
 		{"empty email", "Alice", "", nil, true, domain.CodeValidation},
 		{"whitespace email", "Alice", "   ", nil, true, domain.CodeValidation},
 		{"invalid email format", "Alice", "not-an-email", nil, true, domain.CodeValidation},
@@ -114,7 +112,7 @@ func TestCreateUser(t *testing.T) {
 			repo.createErr = tt.createErr
 			svc := NewUserService(repo)
 
-			user, err := svc.CreateUser(context.Background(), tt.userName, tt.email)
+			user, err := svc.CreateUser(context.Background(), tt.username, tt.email)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -133,11 +131,17 @@ func TestCreateUser(t *testing.T) {
 			if user.ID == 0 {
 				t.Error("expected user ID to be set")
 			}
-			if user.Name != tt.userName {
-				t.Errorf("name = %q; want %q", user.Name, tt.userName)
+			if user.Username != tt.username {
+				t.Errorf("username = %q; want %q", user.Username, tt.username)
 			}
 			if user.Email != tt.email {
 				t.Errorf("email = %q; want %q", user.Email, tt.email)
+			}
+			if user.Role != domain.RoleUser {
+				t.Errorf("role = %q; want %q", user.Role, domain.RoleUser)
+			}
+			if user.Status != domain.StatusActive {
+				t.Errorf("status = %q; want %q", user.Status, domain.StatusActive)
 			}
 		})
 	}
@@ -158,8 +162,8 @@ func TestGetUser(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if user.Name != "Bob" {
-			t.Errorf("name = %q; want Bob", user.Name)
+		if user.Username != "Bob" {
+			t.Errorf("username = %q; want Bob", user.Username)
 		}
 	})
 
@@ -220,8 +224,8 @@ func TestListUsers(t *testing.T) {
 		if result.CurrentPage != 3 {
 			t.Errorf("page = %d; want 3", result.CurrentPage)
 		}
-		if result.ItemsPerPage != 25 {
-			t.Errorf("pageSize = %d; want 25", result.ItemsPerPage)
+		if result.PageSize != 25 {
+			t.Errorf("pageSize = %d; want 25", result.PageSize)
 		}
 	})
 }
@@ -233,55 +237,137 @@ func TestUpdateUser(t *testing.T) {
 	created, _ := svc.CreateUser(context.Background(), "Old", "old@example.com")
 
 	t.Run("success", func(t *testing.T) {
-		updated, err := svc.UpdateUser(context.Background(), created.ID, "New", "new@example.com")
+		updated, err := svc.UpdateUser(context.Background(), created.ID, "New", "new@example.com", "", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if updated.Name != "New" {
-			t.Errorf("name = %q; want New", updated.Name)
+		if updated.Username != "New" {
+			t.Errorf("username = %q; want New", updated.Username)
 		}
 		if updated.Email != "new@example.com" {
 			t.Errorf("email = %q; want new@example.com", updated.Email)
 		}
+		if updated.Role != domain.RoleUser {
+			t.Errorf("role = %q; want %q (preserved)", updated.Role, domain.RoleUser)
+		}
 	})
 
-	t.Run("empty name", func(t *testing.T) {
-		_, err := svc.UpdateUser(context.Background(), created.ID, "", "new@example.com")
+	t.Run("with role change", func(t *testing.T) {
+		ctx := withAdminFieldAuthorized(context.Background(), true)
+		updated, err := svc.UpdateUser(ctx, created.ID, "New", "new@example.com", domain.RoleAdmin, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if updated.Role != domain.RoleAdmin {
+			t.Errorf("role = %q; want %q", updated.Role, domain.RoleAdmin)
+		}
+	})
+
+	t.Run("with status change", func(t *testing.T) {
+		ctx := withAdminFieldAuthorized(context.Background(), true)
+		updated, err := svc.UpdateUser(ctx, created.ID, "New", "new@example.com", "", domain.StatusDisabled)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if updated.Status != domain.StatusDisabled {
+			t.Errorf("status = %q; want %q", updated.Status, domain.StatusDisabled)
+		}
+	})
+
+	t.Run("role silently ignored for non-admin", func(t *testing.T) {
+		// First set role to admin via admin context
+		ctx := withAdminFieldAuthorized(context.Background(), true)
+		_, _ = svc.UpdateUser(ctx, created.ID, "New", "new@example.com", domain.RoleAdmin, "")
+
+		// Non-admin tries to change role back to user — should succeed but role stays admin
+		updated, err := svc.UpdateUser(context.Background(), created.ID, "New", "new@example.com", domain.RoleUser, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if updated.Role != domain.RoleAdmin {
+			t.Errorf("role = %q; want %q (should be preserved)", updated.Role, domain.RoleAdmin)
+		}
+	})
+
+	t.Run("status silently ignored for non-admin", func(t *testing.T) {
+		// Ensure status is active
+		ctx := withAdminFieldAuthorized(context.Background(), true)
+		_, _ = svc.UpdateUser(ctx, created.ID, "New", "new@example.com", "", domain.StatusActive)
+
+		// Non-admin tries to change status — should succeed but status stays active
+		updated, err := svc.UpdateUser(context.Background(), created.ID, "New", "new@example.com", "", domain.StatusPending)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if updated.Status != domain.StatusActive {
+			t.Errorf("status = %q; want %q (should be preserved)", updated.Status, domain.StatusActive)
+		}
+	})
+
+	t.Run("empty role preserves existing", func(t *testing.T) {
+		// Restore to admin first
+		ctx := withAdminFieldAuthorized(context.Background(), true)
+		_, _ = svc.UpdateUser(ctx, created.ID, "New", "new@example.com", domain.RoleAdmin, "")
+		updated, err := svc.UpdateUser(context.Background(), created.ID, "New", "new@example.com", "", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if updated.Role != domain.RoleAdmin {
+			t.Errorf("role = %q; want %q (preserved)", updated.Role, domain.RoleAdmin)
+		}
+	})
+
+	t.Run("invalid role", func(t *testing.T) {
+		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "new@example.com", "superuser", "")
+		if !domain.IsValidation(err) {
+			t.Errorf("expected validation error for invalid role, got %v", err)
+		}
+	})
+
+	t.Run("invalid status", func(t *testing.T) {
+		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "new@example.com", "", "archived")
+		if !domain.IsValidation(err) {
+			t.Errorf("expected validation error for invalid status, got %v", err)
+		}
+	})
+
+	t.Run("empty username", func(t *testing.T) {
+		_, err := svc.UpdateUser(context.Background(), created.ID, "", "new@example.com", "", "")
 		if !domain.IsValidation(err) {
 			t.Errorf("expected validation error, got %v", err)
 		}
 	})
 
-	t.Run("whitespace name", func(t *testing.T) {
-		_, err := svc.UpdateUser(context.Background(), created.ID, "   ", "new@example.com")
+	t.Run("whitespace username", func(t *testing.T) {
+		_, err := svc.UpdateUser(context.Background(), created.ID, "   ", "new@example.com", "", "")
 		if !domain.IsValidation(err) {
 			t.Errorf("expected validation error, got %v", err)
 		}
 	})
 
 	t.Run("empty email", func(t *testing.T) {
-		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "")
+		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "", "", "")
 		if !domain.IsValidation(err) {
 			t.Errorf("expected validation error, got %v", err)
 		}
 	})
 
-	t.Run("short name", func(t *testing.T) {
-		_, err := svc.UpdateUser(context.Background(), created.ID, "A", "new@example.com")
+	t.Run("short username", func(t *testing.T) {
+		_, err := svc.UpdateUser(context.Background(), created.ID, "A", "new@example.com", "", "")
 		if !domain.IsValidation(err) {
 			t.Errorf("expected validation error, got %v", err)
 		}
 	})
 
 	t.Run("invalid email format", func(t *testing.T) {
-		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "not-an-email")
+		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "not-an-email", "", "")
 		if !domain.IsValidation(err) {
 			t.Errorf("expected validation error, got %v", err)
 		}
 	})
 
 	t.Run("whitespace email", func(t *testing.T) {
-		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "   ")
+		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "   ", "", "")
 		if !domain.IsValidation(err) {
 			t.Errorf("expected validation error, got %v", err)
 		}
@@ -289,7 +375,7 @@ func TestUpdateUser(t *testing.T) {
 
 	t.Run("repo update error", func(t *testing.T) {
 		repo.updateErr = errors.New("db error")
-		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "new@example.com")
+		_, err := svc.UpdateUser(context.Background(), created.ID, "New", "new@example.com", "", "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -297,7 +383,7 @@ func TestUpdateUser(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		_, err := svc.UpdateUser(context.Background(), 9999, "Xi", "x@example.com")
+		_, err := svc.UpdateUser(context.Background(), 9999, "Xi", "x@example.com", "", "")
 		if !domain.IsNotFound(err) {
 			t.Errorf("expected not found error, got %v", err)
 		}
@@ -346,8 +432,8 @@ func TestCreateUser_TrimsWhitespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if user.Name != "Alice" {
-		t.Errorf("name = %q; want %q", user.Name, "Alice")
+	if user.Username != "Alice" {
+		t.Errorf("username = %q; want %q", user.Username, "Alice")
 	}
 	if user.Email != "alice@example.com" {
 		t.Errorf("email = %q; want %q", user.Email, "alice@example.com")
@@ -360,14 +446,73 @@ func TestUpdateUser_TrimsWhitespace(t *testing.T) {
 
 	created, _ := svc.CreateUser(context.Background(), "Old", "old@example.com")
 
-	updated, err := svc.UpdateUser(context.Background(), created.ID, "  New  ", "  new@example.com  ")
+	updated, err := svc.UpdateUser(context.Background(), created.ID, "  New  ", "  new@example.com  ", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if updated.Name != "New" {
-		t.Errorf("name = %q; want %q", updated.Name, "New")
+	if updated.Username != "New" {
+		t.Errorf("username = %q; want %q", updated.Username, "New")
 	}
 	if updated.Email != "new@example.com" {
 		t.Errorf("email = %q; want %q", updated.Email, "new@example.com")
+	}
+}
+
+func TestCreateUser_DefaultRole(t *testing.T) {
+	repo := newMockRepo()
+	svc := NewUserService(repo)
+
+	user, err := svc.CreateUser(context.Background(), "Alice", "alice@example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if user.Role != domain.RoleUser {
+		t.Errorf("role = %q; want %q", user.Role, domain.RoleUser)
+	}
+	if user.Status != domain.StatusActive {
+		t.Errorf("status = %q; want %q", user.Status, domain.StatusActive)
+	}
+}
+
+func TestValidateRole(t *testing.T) {
+	tests := []struct {
+		name    string
+		role    string
+		wantErr bool
+	}{
+		{"valid admin", domain.RoleAdmin, false},
+		{"valid user", domain.RoleUser, false},
+		{"invalid role", "superuser", true},
+		{"empty string", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRole(tt.role)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateRole(%q) error = %v, wantErr %v", tt.role, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  string
+		wantErr bool
+	}{
+		{"valid active", domain.StatusActive, false},
+		{"valid disabled", domain.StatusDisabled, false},
+		{"valid pending", domain.StatusPending, false},
+		{"invalid status", "archived", true},
+		{"empty string", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateStatus(tt.status)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateStatus(%q) error = %v, wantErr %v", tt.status, err, tt.wantErr)
+			}
+		})
 	}
 }

@@ -7,6 +7,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type moduleContract interface {
+	RegisterRoutes(api *gin.RouterGroup, pages *gin.RouterGroup)
+}
+
+var _ moduleContract = (*AuthModule)(nil)
+
 // TestAuthModuleRegisterRoutes verifies that AuthModule satisfies the
 // app.Module interface contract (RegisterRoutes(api, pages *gin.RouterGroup))
 // and registers the expected auth routes.
@@ -25,6 +31,10 @@ func TestAuthModuleRegisterRoutes(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/auth/login"},
 		{http.MethodPost, "/api/auth/register"},
+		{http.MethodPost, "/api/auth/logout"},
+		{http.MethodPost, "/api/auth/refresh"},
+		{http.MethodGet, "/login"},
+		{http.MethodGet, "/register"},
 	}
 
 	routes := r.Routes()

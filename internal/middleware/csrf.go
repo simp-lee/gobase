@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	csrfCookieName = "_csrf_token"
-	csrfFormField  = "_csrf_token"
-	csrfHeaderName = "X-CSRF-Token"
-	csrfContextKey = "CSRFToken"
+	csrfCookieName      = "_csrf_token"
+	csrfFormField       = "_csrf_token"
+	csrfHeaderName      = "X-CSRF-Token"
+	csrfContextKey      = "CSRFToken"
+	csrfMinSecretLength = 32
 )
 
 // CSRF returns a gin middleware that provides CSRF protection for HTML form submissions.
@@ -43,8 +44,14 @@ func CSRF(secret string) gin.HandlerFunc {
 			})
 		}
 	}
+	if len(secret) < csrfMinSecretLength {
+		return func(c *gin.Context) {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+				"error": "csrf secret must be at least 32 characters",
+			})
+		}
+	}
 
-	secure := gin.Mode() == gin.ReleaseMode
 	return func(c *gin.Context) {
 		switch c.Request.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -57,11 +64,10 @@ func CSRF(secret string) gin.HandlerFunc {
 					})
 					return
 				}
-				setCSRFCookie(c, token, secure)
+				setCSRFCookie(c, token, requestIsSecure(c.Request))
 			}
 			c.Set(csrfContextKey, token)
 			c.Next()
-
 		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 			cookieToken, err := c.Cookie(csrfCookieName)
 			if err != nil || cookieToken == "" {
@@ -98,7 +104,6 @@ func CSRF(secret string) gin.HandlerFunc {
 
 			c.Set(csrfContextKey, cookieToken)
 			c.Next()
-
 		default:
 			c.Next()
 		}
@@ -121,6 +126,10 @@ func GetCSRFToken(c *gin.Context) string {
 // should only be used on requests that have already passed through CSRF(secret)
 // in the same request chain. If the token is already present in gin.Context,
 // this is a no-op.
+//
+// Deprecated: SetCSRFToken does not verify the token signature.
+// Use SetCSRFTokenWithSecret instead, which validates the HMAC before storing.
+// Removal target: v2.0.
 func SetCSRFToken(c *gin.Context) {
 	if _, exists := c.Get(csrfContextKey); exists {
 		return
@@ -180,14 +189,49 @@ func validToken(token, secret string) bool {
 	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(expectedSig)) == 1
 }
 
+// ValidateCSRFToken validates a CSRF token format and signature.
+func ValidateCSRFToken(token, secret string) bool {
+	return validToken(token, secret)
+}
+
 // tokensMatch performs a constant-time comparison of two token strings.
 func tokensMatch(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+// ValidateCSRFTokenPair validates both tokens and checks they match.
+func ValidateCSRFTokenPair(cookieToken, requestToken, secret string) bool {
+	return validToken(cookieToken, secret) && validToken(requestToken, secret) && tokensMatch(cookieToken, requestToken)
+}
+
+// requestIsSecure reports whether the incoming request arrived over HTTPS.
+// It checks the actual TLS connection first, then falls back to reverse-proxy
+// headers X-Forwarded-Proto and X-Forwarded-Ssl.
+func requestIsSecure(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
+		for _, part := range strings.Split(forwardedProto, ",") {
+			proto := strings.TrimSpace(part)
+			if proto == "" {
+				continue
+			}
+			return strings.EqualFold(proto, "https")
+		}
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on") {
+		return true
+	}
+	return false
+}
+
 // setCSRFCookie sets the CSRF token cookie with HttpOnly=false and SameSite=Strict.
-// When secure is true (release mode), the Secure flag is set so the cookie is
-// only transmitted over HTTPS.
+// When secure is true, the Secure flag is set so the cookie is only transmitted
+// over HTTPS.
 func setCSRFCookie(c *gin.Context, token string, secure bool) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     csrfCookieName,

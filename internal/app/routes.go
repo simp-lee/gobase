@@ -36,9 +36,6 @@ func RegisterRoutes(r *gin.Engine, deps *RouteDeps) error {
 	if deps == nil {
 		return errors.New("route dependencies are nil")
 	}
-	if len(deps.Modules) == 0 {
-		return errors.New("at least one module is required")
-	}
 	if strings.TrimSpace(deps.CSRFSecret) == "" {
 		return errors.New("csrf secret is required")
 	}
@@ -51,32 +48,88 @@ func RegisterRoutes(r *gin.Engine, deps *RouteDeps) error {
 	// Health check (M3)
 	r.GET("/health", healthHandler(deps.DB))
 
-	// Home page (with CSRF so templates have a token)
-	r.GET("/", middleware.CSRF(deps.CSRFSecret), func(c *gin.Context) {
-		c.HTML(http.StatusOK, "home.html", gin.H{
-			"CSRFToken": middleware.GetCSRFToken(c),
-		})
-	})
-
 	// API routes — no CSRF
 	api := r.Group("/api/v1")
 
 	// Page routes — with CSRF
 	pages := r.Group("/")
 	pages.Use(middleware.CSRF(deps.CSRFSecret))
+	registerDefaultPageRoutes(pages)
 
-	// Register module routes
+	// Register module routes with panic protection and duplicate detection
+	routeOwners := make(map[string]int)
+	for _, routeInfo := range r.Routes() {
+		routeOwners[routeSignature(routeInfo.Method, routeInfo.Path)] = -1
+	}
+
 	for i, m := range deps.Modules {
 		if m == nil {
 			return fmt.Errorf("module at index %d is nil", i)
 		}
-		m.RegisterRoutes(api, pages)
+
+		before := snapshotRouteSignatures(r.Routes())
+		if err := registerModuleRoutesSafely(m, api, pages); err != nil {
+			return fmt.Errorf("register routes for module at index %d: %w", i, err)
+		}
+
+		for _, routeInfo := range r.Routes() {
+			signature := routeSignature(routeInfo.Method, routeInfo.Path)
+			if _, existedBefore := before[signature]; existedBefore {
+				continue
+			}
+			if owner, exists := routeOwners[signature]; exists {
+				return fmt.Errorf("duplicate route %q from module at index %d (already registered by module at index %d)", signature, i, owner)
+			}
+			routeOwners[signature] = i
+		}
 	}
 
 	// NoRoute handler (M5)
 	r.NoRoute(noRouteHandler())
 
 	return nil
+}
+
+func registerModuleRoutesSafely(m Module, api *gin.RouterGroup, pages *gin.RouterGroup) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic while registering routes: %v", rec)
+		}
+	}()
+
+	m.RegisterRoutes(api, pages)
+	return nil
+}
+
+func snapshotRouteSignatures(routes gin.RoutesInfo) map[string]struct{} {
+	signatures := make(map[string]struct{}, len(routes))
+	for _, routeInfo := range routes {
+		signatures[routeSignature(routeInfo.Method, routeInfo.Path)] = struct{}{}
+	}
+	return signatures
+}
+
+func routeSignature(method, path string) string {
+	normalizedMethod := strings.ToUpper(strings.TrimSpace(method))
+	normalizedPath := strings.TrimSpace(path)
+	if normalizedPath == "" {
+		normalizedPath = "/"
+	}
+	if !strings.HasPrefix(normalizedPath, "/") {
+		normalizedPath = "/" + normalizedPath
+	}
+	if len(normalizedPath) > 1 {
+		normalizedPath = strings.TrimSuffix(normalizedPath, "/")
+	}
+	return normalizedMethod + " " + normalizedPath
+}
+
+func registerDefaultPageRoutes(pages *gin.RouterGroup) {
+	pages.GET("/", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "home.html", gin.H{
+			"CSRFToken": middleware.GetCSRFToken(c),
+		})
+	})
 }
 
 // healthHandler returns a handler that pings the database and reports status.
@@ -146,6 +199,15 @@ func registerStaticRoutesWithError(r *gin.Engine, mode string) error {
 		}
 		fileServer := http.StripPrefix("/static", http.FileServer(http.FS(debugStaticFS)))
 		r.GET("/static/*filepath", func(c *gin.Context) {
+			requestedPath := c.Param("filepath")
+			if strings.HasSuffix(requestedPath, "/sw.js") || strings.HasSuffix(requestedPath, "/manifest.json") {
+				c.Header("Cache-Control", "no-cache, max-age=0, must-revalidate")
+			} else {
+				c.Header("Cache-Control", "no-store")
+			}
+			if strings.HasSuffix(requestedPath, "/sw.js") {
+				c.Header("Service-Worker-Allowed", "/")
+			}
 			fileServer.ServeHTTP(c.Writer, c.Request)
 		})
 		return nil
@@ -180,7 +242,15 @@ func resolveDebugStaticFS() (fs.FS, error) {
 func cacheStaticHandler(fsys http.FileSystem) gin.HandlerFunc {
 	fileServer := http.StripPrefix("/static", http.FileServer(fsys))
 	return func(c *gin.Context) {
-		c.Header("Cache-Control", "public, max-age=86400")
+		requestedPath := c.Param("filepath")
+		if strings.HasSuffix(requestedPath, "/sw.js") || strings.HasSuffix(requestedPath, "/manifest.json") {
+			c.Header("Cache-Control", "no-cache, max-age=0, must-revalidate")
+		} else {
+			c.Header("Cache-Control", "public, max-age=86400")
+		}
+		if strings.HasSuffix(requestedPath, "/sw.js") {
+			c.Header("Service-Worker-Allowed", "/")
+		}
 		fileServer.ServeHTTP(c.Writer, c.Request)
 	}
 }

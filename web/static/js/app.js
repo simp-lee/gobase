@@ -11,12 +11,50 @@
    Usage: <div x-data="toastManager()" @show-toast.window="addToast($event.detail)">
    -------------------------------------------------------------------------- */
 
+function resolveToastDuration(detail) {
+    if (detail && Number.isFinite(detail.duration) && detail.duration > 0) {
+        return detail.duration;
+    }
+
+    return 5000;
+}
+
+window.__gobaseToastBus = window.__gobaseToastBus || {
+    ready: false,
+    queue: [],
+    dispatch(detail) {
+        const payload = detail || {};
+
+        if (!this.ready) {
+            this.queue.push(payload);
+            return;
+        }
+
+        window.dispatchEvent(new CustomEvent('show-toast', { detail: payload }));
+    },
+    markReady() {
+        if (this.ready) {
+            return;
+        }
+
+        this.ready = true;
+        while (this.queue.length > 0) {
+            const payload = this.queue.shift();
+            window.dispatchEvent(new CustomEvent('show-toast', { detail: payload }));
+        }
+    }
+};
+
 function toastManager() {
     return {
+        nextToastId: 1,
         toasts: [],
+        init() {
+            window.__gobaseToastBus.markReady();
+        },
         addToast(detail) {
             const toast = {
-                id: Date.now(),
+                id: this.nextToastId++,
                 message: detail.message || 'Operation completed',
                 type: detail.type || 'info',
                 visible: true
@@ -24,7 +62,7 @@ function toastManager() {
             this.toasts.push(toast);
             setTimeout(() => {
                 this.removeToast(toast.id);
-            }, 3000);
+            }, resolveToastDuration(detail));
         },
         removeToast(id) {
             const toast = this.toasts.find(t => t.id === id);
@@ -40,25 +78,12 @@ function toastManager() {
 
 /* --------------------------------------------------------------------------
    2. htmx HX-Trigger → Alpine.js bridge (M6)
-   When a server response includes HX-Trigger: {"showToast": {...}},
-   parse the header and dispatch an Alpine-compatible custom event.
+   htmx already dispatches native custom events from HX-Trigger headers.
+   Bridge the camelCase showToast event to Alpine's kebab-case listener once.
    -------------------------------------------------------------------------- */
 
-document.addEventListener('htmx:afterRequest', function (evt) {
-    var xhr = evt.detail.xhr;
-    if (!xhr) return;
-
-    var triggerHeader = xhr.getResponseHeader('HX-Trigger');
-    if (triggerHeader) {
-        try {
-            var triggers = JSON.parse(triggerHeader);
-            if (triggers.showToast) {
-                window.dispatchEvent(new CustomEvent('show-toast', { detail: triggers.showToast }));
-            }
-        } catch (e) {
-            // Not JSON – single-event trigger name, ignore
-        }
-    }
+document.body.addEventListener('showToast', function (evt) {
+    window.__gobaseToastBus.dispatch(evt.detail || {});
 });
 
 /* --------------------------------------------------------------------------

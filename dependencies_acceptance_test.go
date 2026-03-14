@@ -24,6 +24,10 @@ func TestModuleDependencies_XCryptoPresent(t *testing.T) {
 	testModulePresence(t, "golang.org/x/crypto")
 }
 
+func TestModuleDependencies_BluemondayPresent(t *testing.T) {
+	testModulePresence(t, "github.com/microcosm-cc/bluemonday")
+}
+
 func TestPaginationAPI_NoLegacyNewPageResult(t *testing.T) {
 	t.Run("happy_repo_has_no_legacy_symbol", func(t *testing.T) {
 		matches, err := findLegacyNewPageResultUsages(".")

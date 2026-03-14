@@ -7,6 +7,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type moduleContract interface {
+	RegisterRoutes(api *gin.RouterGroup, pages *gin.RouterGroup)
+}
+
+var _ moduleContract = (*UserModule)(nil)
+
 // TestUserModuleImplementsModuleInterface verifies that UserModule satisfies
 // the app.Module interface contract (RegisterRoutes(api, pages *gin.RouterGroup)).
 // We don't import app to keep the dependency direction clean; instead we check
@@ -75,4 +81,41 @@ func TestNewModule_PanicsOnNilPageHandler(t *testing.T) {
 	}()
 
 	_ = NewModule(&UserHandler{}, nil)
+}
+
+func TestUserModuleRegisterRoutes_AllowsNilPages(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	api := r.Group("/api")
+
+	mod := NewModule(
+		&UserHandler{},
+		&UserPageHandler{},
+	)
+
+	mod.RegisterRoutes(api, nil)
+
+	expectedAPI := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/users"},
+		{http.MethodGet, "/api/users/:id"},
+		{http.MethodGet, "/api/users"},
+		{http.MethodPut, "/api/users/:id"},
+		{http.MethodDelete, "/api/users/:id"},
+	}
+
+	routes := r.Routes()
+	registered := make(map[string]bool)
+	for _, ri := range routes {
+		registered[ri.Method+":"+ri.Path] = true
+	}
+
+	for _, exp := range expectedAPI {
+		key := exp.method + ":" + exp.path
+		if !registered[key] {
+			t.Errorf("expected API route %s %s to be registered", exp.method, exp.path)
+		}
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/simp-lee/gobase/internal/domain"
+	"github.com/simp-lee/pagination"
 	"gorm.io/gorm"
 	dbtest "gorm.io/gorm/utils/tests"
 )
@@ -114,6 +115,82 @@ func TestParsePageRequest_Clamping(t *testing.T) {
 			t.Errorf("expected PageSize=20, got %d", pr.PageSize)
 		}
 	})
+}
+
+func TestParsePageRequest_MaxPageClamping(t *testing.T) {
+	t.Run("page above maxPage is clamped", func(t *testing.T) {
+		c := newTestContext(url.Values{"page": {"20000"}})
+		pr := ParsePageRequest(c)
+		if pr.Page != 10000 {
+			t.Errorf("expected Page=10000, got %d", pr.Page)
+		}
+	})
+
+	t.Run("page exactly at maxPage", func(t *testing.T) {
+		c := newTestContext(url.Values{"page": {"10000"}})
+		pr := ParsePageRequest(c)
+		if pr.Page != 10000 {
+			t.Errorf("expected Page=10000, got %d", pr.Page)
+		}
+	})
+
+	t.Run("page just below maxPage", func(t *testing.T) {
+		c := newTestContext(url.Values{"page": {"9999"}})
+		pr := ParsePageRequest(c)
+		if pr.Page != 9999 {
+			t.Errorf("expected Page=9999, got %d", pr.Page)
+		}
+	})
+}
+
+func TestToPageResult(t *testing.T) {
+	p := &pagination.Pagination[paginationTestItem]{
+		Items:        []paginationTestItem{{ID: 1, Name: "a"}, {ID: 2, Name: "b"}},
+		TotalItems:   42,
+		TotalPages:   5,
+		CurrentPage:  2,
+		ItemsPerPage: 10,
+	}
+
+	result := ToPageResult(p)
+
+	if len(result.Items) != 2 {
+		t.Errorf("Items count: want 2, got %d", len(result.Items))
+	}
+	if result.TotalItems != 42 {
+		t.Errorf("TotalItems: want 42, got %d", result.TotalItems)
+	}
+	if result.TotalPages != 5 {
+		t.Errorf("TotalPages: want 5, got %d", result.TotalPages)
+	}
+	if result.CurrentPage != 2 {
+		t.Errorf("CurrentPage: want 2, got %d", result.CurrentPage)
+	}
+	if result.PageSize != 10 {
+		t.Errorf("PageSize: want 10, got %d", result.PageSize)
+	}
+}
+
+func TestToPageResult_Empty(t *testing.T) {
+	p := &pagination.Pagination[paginationTestItem]{
+		Items:        nil,
+		TotalItems:   0,
+		TotalPages:   0,
+		CurrentPage:  1,
+		ItemsPerPage: 20,
+	}
+
+	result := ToPageResult(p)
+
+	if result.TotalItems != 0 {
+		t.Errorf("TotalItems: want 0, got %d", result.TotalItems)
+	}
+	if result.Items != nil {
+		t.Errorf("Items: want nil, got %v", result.Items)
+	}
+	if result.PageSize != 20 {
+		t.Errorf("PageSize: want 20, got %d", result.PageSize)
+	}
 }
 
 func TestParsePageRequest_EmptyFilterValuesIgnored(t *testing.T) {

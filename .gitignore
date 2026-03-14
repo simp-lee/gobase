@@ -17,3 +17,4 @@ web/static/vendor/*.css
 # Temp
 tmp/
 .agents-work/
+.go-test-lock/

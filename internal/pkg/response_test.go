@@ -1,8 +1,10 @@
 package pkg
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -178,6 +180,40 @@ func TestError_GenericError(t *testing.T) {
 	}
 }
 
+func TestError_GenericError_LogsSlog(t *testing.T) {
+	// Capture slog output to verify unhandled errors are logged.
+	var buf bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(original) })
+
+	c, _ := newResponseTestContext()
+	Error(c, errors.New("unexpected failure"))
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "unhandled error") {
+		t.Errorf("expected slog output to contain %q, got %q", "unhandled error", logOutput)
+	}
+	if !strings.Contains(logOutput, "unexpected failure") {
+		t.Errorf("expected slog output to contain error message %q, got %q", "unexpected failure", logOutput)
+	}
+}
+
+func TestError_AppError_DoesNotLogSlog(t *testing.T) {
+	// Verify that AppErrors do NOT trigger slog logging.
+	var buf bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(original) })
+
+	c, _ := newResponseTestContext()
+	Error(c, domain.ErrNotFound)
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no slog output for AppError, got %q", buf.String())
+	}
+}
+
 func TestList(t *testing.T) {
 	c, w := newResponseTestContext()
 
@@ -294,6 +330,27 @@ func TestValidationError_NonValidationError(t *testing.T) {
 	}
 	if resp.Message != "bad request" {
 		t.Errorf("expected message %q, got %q", "bad request", resp.Message)
+	}
+}
+
+func TestFieldValidationError(t *testing.T) {
+	c, w := newResponseTestContext()
+
+	FieldValidationError(c, map[string]string{"confirm_password": "confirm_password does not match password"})
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp ValidationErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Message != "validation error" {
+		t.Errorf("expected message %q, got %q", "validation error", resp.Message)
+	}
+	if resp.Errors["confirm_password"] != "confirm_password does not match password" {
+		t.Errorf("expected confirm_password error, got %q", resp.Errors["confirm_password"])
 	}
 }
 
@@ -424,6 +481,71 @@ func TestBindAndValidate_MinLength(t *testing.T) {
 		t.Error("expected error for field 'name'")
 	} else if msg != "Must be at least 3 characters" {
 		t.Errorf("expected message %q for name field, got %q", "Must be at least 3 characters", msg)
+	}
+}
+
+func TestBuildJSONTagMap_EmbeddedStruct(t *testing.T) {
+	type Base struct {
+		ID   uint   `json:"id"`
+		Name string `json:"name"`
+	}
+	type Extended struct {
+		Base
+		Email string `json:"email"`
+	}
+
+	m := buildJSONTagMap(&Extended{})
+
+	want := map[string]string{"ID": "id", "Name": "name", "Email": "email"}
+	for field, tag := range want {
+		if m[field] != tag {
+			t.Errorf("buildJSONTagMap[%q] = %q; want %q", field, m[field], tag)
+		}
+	}
+}
+
+func TestBuildJSONTagMap_EmbeddedPointerStruct(t *testing.T) {
+	type Inner struct {
+		Foo string `json:"foo"`
+	}
+	type Outer struct {
+		*Inner
+		Bar string `json:"bar"`
+	}
+
+	m := buildJSONTagMap(&Outer{})
+
+	if m["Foo"] != "foo" {
+		t.Errorf("buildJSONTagMap[Foo] = %q; want %q", m["Foo"], "foo")
+	}
+	if m["Bar"] != "bar" {
+		t.Errorf("buildJSONTagMap[Bar] = %q; want %q", m["Bar"], "bar")
+	}
+}
+
+func TestBuildJSONTagMap_CircularEmbedding(t *testing.T) {
+	// Ensure the visited map prevents infinite recursion.
+	// We can't easily create a true circular embedding in Go types,
+	// but we can verify that the function handles deeply nested embeddings.
+	type Level2 struct {
+		C string `json:"c"`
+	}
+	type Level1 struct {
+		Level2
+		B string `json:"b"`
+	}
+	type Root struct {
+		Level1
+		A string `json:"a"`
+	}
+
+	m := buildJSONTagMap(&Root{})
+
+	want := map[string]string{"A": "a", "B": "b", "C": "c"}
+	for field, tag := range want {
+		if m[field] != tag {
+			t.Errorf("buildJSONTagMap[%q] = %q; want %q", field, m[field], tag)
+		}
 	}
 }
 

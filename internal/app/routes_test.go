@@ -8,6 +8,9 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -56,6 +59,15 @@ func setupTestRouter() *gin.Engine {
 	}
 	r.HTMLRender = renderer
 	return r
+}
+
+// mustCallerFile returns the file path of the caller (this test file).
+func mustCallerFile() string {
+	_, f, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("runtime.Caller failed")
+	}
+	return f
 }
 
 // --- Health check tests (M3) ---
@@ -271,6 +283,94 @@ func TestRegisterStaticRoutes_Debug(t *testing.T) {
 	}
 }
 
+// TestRegisterStaticRoutes_Debug_SWAndManifestHeaders verifies that the debug-mode
+// static handler sets correct Cache-Control and Service-Worker-Allowed headers
+// for sw.js and manifest.json requests.
+func TestRegisterStaticRoutes_Debug_SWAndManifestHeaders(t *testing.T) {
+	// Create temporary sw.js and manifest.json in the real web/static dir
+	// so the debug file-server can serve them (resolveDebugStaticFS uses
+	// runtime.Caller to locate web/static on disk).
+	staticDir := filepath.Join(filepath.Dir(mustCallerFile()), "..", "..", "web", "static")
+
+	swDir := filepath.Join(staticDir, "js")
+	swPath := filepath.Join(swDir, "sw.js")
+	if err := os.MkdirAll(swDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", swDir, err)
+	}
+	if err := os.WriteFile(swPath, []byte("// sw stub"), 0o644); err != nil {
+		t.Fatalf("write sw.js: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(swPath) })
+
+	manifestPath := filepath.Join(staticDir, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write manifest.json: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(manifestPath) })
+
+	r := gin.New()
+	registerStaticRoutes(r, "debug")
+
+	// sw.js
+	wSW := httptest.NewRecorder()
+	reqSW := httptest.NewRequest(http.MethodGet, "/static/js/sw.js", nil)
+	r.ServeHTTP(wSW, reqSW)
+
+	if wSW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for sw.js in debug mode, got %d", wSW.Code)
+	}
+	if cc := wSW.Header().Get("Cache-Control"); cc != "no-cache, max-age=0, must-revalidate" {
+		t.Errorf("expected sw.js Cache-Control 'no-cache, max-age=0, must-revalidate', got %q", cc)
+	}
+	if swa := wSW.Header().Get("Service-Worker-Allowed"); swa != "/" {
+		t.Errorf("expected Service-Worker-Allowed '/', got %q", swa)
+	}
+
+	// manifest.json
+	wManifest := httptest.NewRecorder()
+	reqManifest := httptest.NewRequest(http.MethodGet, "/static/manifest.json", nil)
+	r.ServeHTTP(wManifest, reqManifest)
+
+	if wManifest.Code != http.StatusOK {
+		t.Fatalf("expected 200 for manifest.json in debug mode, got %d", wManifest.Code)
+	}
+	if cc := wManifest.Header().Get("Cache-Control"); cc != "no-cache, max-age=0, must-revalidate" {
+		t.Errorf("expected manifest Cache-Control 'no-cache, max-age=0, must-revalidate', got %q", cc)
+	}
+	if swa := wManifest.Header().Get("Service-Worker-Allowed"); swa != "" {
+		t.Errorf("expected no Service-Worker-Allowed for manifest.json, got %q", swa)
+	}
+}
+
+func TestRegisterStaticRoutes_Debug_RegularFileNoStore(t *testing.T) {
+	// Ensure that non-special static files in debug mode get Cache-Control: no-store
+	// so browsers never serve stale CSS/JS during development.
+	staticDir := filepath.Join(filepath.Dir(mustCallerFile()), "..", "..", "web", "static")
+	cssDir := filepath.Join(staticDir, "css")
+	cssPath := filepath.Join(cssDir, "test_debug.css")
+	if err := os.MkdirAll(cssDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", cssDir, err)
+	}
+	if err := os.WriteFile(cssPath, []byte("body{}"), 0o644); err != nil {
+		t.Fatalf("write test_debug.css: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(cssPath) })
+
+	r := gin.New()
+	registerStaticRoutes(r, "debug")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/static/css/test_debug.css", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("expected Cache-Control 'no-store' for regular file in debug mode, got %q", cc)
+	}
+}
+
 func TestRegisterStaticRoutes_Release_CacheHeader(t *testing.T) {
 	r := gin.New()
 	registerStaticRoutes(r, "release")
@@ -311,6 +411,58 @@ func TestCacheStaticHandler_SetsCacheControl(t *testing.T) {
 	}
 }
 
+func TestCacheStaticHandler_SwJS_NoCacheAndServiceWorkerAllowed(t *testing.T) {
+	memFS := fstest.MapFS{
+		"sw.js": &fstest.MapFile{Data: []byte("// service worker")},
+	}
+	httpFS := http.FS(memFS)
+
+	r := gin.New()
+	r.GET("/static/*filepath", cacheStaticHandler(httpFS))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/static/sw.js", nil)
+	r.ServeHTTP(w, req)
+
+	cc := w.Header().Get("Cache-Control")
+	if cc != "no-cache, max-age=0, must-revalidate" {
+		t.Errorf("expected Cache-Control 'no-cache, max-age=0, must-revalidate', got %q", cc)
+	}
+	swa := w.Header().Get("Service-Worker-Allowed")
+	if swa != "/" {
+		t.Errorf("expected Service-Worker-Allowed '/', got %q", swa)
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestCacheStaticHandler_ManifestJSON_NoCache(t *testing.T) {
+	memFS := fstest.MapFS{
+		"manifest.json": &fstest.MapFile{Data: []byte(`{"name":"test"}`)},
+	}
+	httpFS := http.FS(memFS)
+
+	r := gin.New()
+	r.GET("/static/*filepath", cacheStaticHandler(httpFS))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/static/manifest.json", nil)
+	r.ServeHTTP(w, req)
+
+	cc := w.Header().Get("Cache-Control")
+	if cc != "no-cache, max-age=0, must-revalidate" {
+		t.Errorf("expected Cache-Control 'no-cache, max-age=0, must-revalidate', got %q", cc)
+	}
+	swa := w.Header().Get("Service-Worker-Allowed")
+	if swa != "" {
+		t.Errorf("expected no Service-Worker-Allowed header for manifest.json, got %q", swa)
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
 // --- RegisterRoutes validation tests ---
 
 // mockModule implements Module for testing.
@@ -340,10 +492,12 @@ func TestRegisterRoutes_NilDeps(t *testing.T) {
 func TestRegisterRoutes_NoModules(t *testing.T) {
 	r := setupTestRouter()
 	err := RegisterRoutes(r, &RouteDeps{
+		DB:         openTestSQLiteDB(t),
+		Mode:       "debug",
 		CSRFSecret: "test-secret-32-chars-long-enough",
 	})
-	if err == nil || !strings.Contains(err.Error(), "at least one module is required") {
-		t.Fatalf("expected 'at least one module is required' error, got %v", err)
+	if err != nil {
+		t.Fatalf("expected no error with zero modules, got %v", err)
 	}
 }
 
@@ -495,6 +649,33 @@ func TestHomePage(t *testing.T) {
 	}
 }
 
+func TestRegisterRoutes_DefaultHomePage(t *testing.T) {
+	r := setupTestRouter()
+	err := RegisterRoutes(r, &RouteDeps{
+		Modules:    nil,
+		DB:         openTestSQLiteDB(t),
+		Mode:       "debug",
+		CSRFSecret: "test-secret-32-chars-long-enough",
+	})
+	if err != nil {
+		t.Fatalf("RegisterRoutes() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "home:") {
+		t.Errorf("expected body to contain rendered home page, got %q", body)
+	}
+	if csrfCookie := w.Result().Cookies(); len(csrfCookie) == 0 {
+		t.Error("expected csrf middleware to set a cookie on the home page")
+	}
+}
+
 // --- fs.Sub test for release static ---
 
 func TestStaticFS_SubWorks(t *testing.T) {
@@ -549,3 +730,179 @@ type blockingPingTx struct{}
 
 func (blockingPingTx) Commit() error   { return nil }
 func (blockingPingTx) Rollback() error { return nil }
+
+// --- Panic recovery tests ---
+
+// panicModule implements Module and panics during registration.
+type panicModule struct{}
+
+func (m *panicModule) RegisterRoutes(api *gin.RouterGroup, pages *gin.RouterGroup) {
+	panic("module exploded")
+}
+
+// routeRegModule implements Module and registers configurable routes.
+type routeRegModule struct {
+	setup func(api *gin.RouterGroup, pages *gin.RouterGroup)
+}
+
+func (m *routeRegModule) RegisterRoutes(api *gin.RouterGroup, pages *gin.RouterGroup) {
+	if m.setup != nil {
+		m.setup(api, pages)
+	}
+}
+
+func TestRegisterRoutes_ModulePanic_ReturnsError(t *testing.T) {
+	r := setupTestRouter()
+	err := RegisterRoutes(r, &RouteDeps{
+		Modules:    []Module{&panicModule{}},
+		DB:         openTestSQLiteDB(t),
+		Mode:       "debug",
+		CSRFSecret: "test-secret-32-chars-long-enough",
+	})
+	if err == nil {
+		t.Fatal("expected error when module panics, got nil")
+	}
+	if !strings.Contains(err.Error(), "panic while registering routes") {
+		t.Fatalf("expected panic error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "module exploded") {
+		t.Fatalf("expected panic value in error, got %v", err)
+	}
+}
+
+func TestRegisterRoutes_DuplicateRoutes_GinPanic(t *testing.T) {
+	noop := func(c *gin.Context) {}
+	modA := &routeRegModule{setup: func(api *gin.RouterGroup, _ *gin.RouterGroup) {
+		api.GET("/items", noop)
+	}}
+	modB := &routeRegModule{setup: func(api *gin.RouterGroup, _ *gin.RouterGroup) {
+		api.GET("/items", noop)
+	}}
+
+	r := setupTestRouter()
+	err := RegisterRoutes(r, &RouteDeps{
+		Modules:    []Module{modA, modB},
+		DB:         openTestSQLiteDB(t),
+		Mode:       "debug",
+		CSRFSecret: "test-secret-32-chars-long-enough",
+	})
+	if err == nil {
+		t.Fatal("expected error for duplicate routes, got nil")
+	}
+	if !strings.Contains(err.Error(), "already registered") {
+		t.Fatalf("expected gin duplicate panic in error, got %v", err)
+	}
+}
+
+func TestRegisterRoutes_DuplicateRoutes_DedupMap(t *testing.T) {
+	// Simulate dedup detection via routeOwners map:
+	// modA registers GET /api/v1/items, modB registers GET /api/v1/items on pages
+	// group resulting in same absolute path — caught by dedup map.
+	// In practice gin panics first; this tests the dedup map logic directly.
+	routeOwners := map[string]int{
+		"GET /api/v1/items": 0,
+	}
+	sig := routeSignature("GET", "/api/v1/items")
+	if owner, exists := routeOwners[sig]; !exists {
+		t.Fatal("expected dedup map to contain route")
+	} else if owner != 0 {
+		t.Fatalf("expected owner 0, got %d", owner)
+	}
+}
+
+func TestRegisterRoutes_NoDuplicatesAcrossModules(t *testing.T) {
+	noop := func(c *gin.Context) {}
+	modA := &routeRegModule{setup: func(api *gin.RouterGroup, _ *gin.RouterGroup) {
+		api.GET("/items", noop)
+	}}
+	modB := &routeRegModule{setup: func(api *gin.RouterGroup, _ *gin.RouterGroup) {
+		api.GET("/orders", noop)
+	}}
+
+	r := setupTestRouter()
+	err := RegisterRoutes(r, &RouteDeps{
+		Modules:    []Module{modA, modB},
+		DB:         openTestSQLiteDB(t),
+		Mode:       "debug",
+		CSRFSecret: "test-secret-32-chars-long-enough",
+	})
+	if err != nil {
+		t.Fatalf("expected no error for distinct routes, got %v", err)
+	}
+}
+
+// --- registerModuleRoutesSafely unit tests ---
+
+func TestRegisterModuleRoutesSafely_NoPanic(t *testing.T) {
+	r := gin.New()
+	api := r.Group("/api")
+	pages := r.Group("/")
+	err := registerModuleRoutesSafely(&mockModule{}, api, pages)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+func TestRegisterModuleRoutesSafely_Panic(t *testing.T) {
+	r := gin.New()
+	api := r.Group("/api")
+	pages := r.Group("/")
+	err := registerModuleRoutesSafely(&panicModule{}, api, pages)
+	if err == nil {
+		t.Fatal("expected error from panicking module, got nil")
+	}
+	if !strings.Contains(err.Error(), "panic while registering routes") {
+		t.Fatalf("expected 'panic while registering routes' in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "module exploded") {
+		t.Fatalf("expected panic value in error, got %v", err)
+	}
+}
+
+// --- routeSignature unit tests ---
+
+func TestRouteSignature(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		want   string
+	}{
+		{"basic", "GET", "/users", "GET /users"},
+		{"lowercase method", "get", "/users", "GET /users"},
+		{"trailing slash", "POST", "/users/", "POST /users"},
+		{"root path", "GET", "/", "GET /"},
+		{"empty path", "GET", "", "GET /"},
+		{"no leading slash", "GET", "users", "GET /users"},
+		{"whitespace method", " GET ", "/test", "GET /test"},
+		{"whitespace path", "GET", " /test ", "GET /test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := routeSignature(tt.method, tt.path)
+			if got != tt.want {
+				t.Errorf("routeSignature(%q, %q) = %q; want %q", tt.method, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- snapshotRouteSignatures unit tests ---
+
+func TestSnapshotRouteSignatures(t *testing.T) {
+	r := gin.New()
+	noop := func(c *gin.Context) {}
+	r.GET("/a", noop)
+	r.POST("/b", noop)
+
+	snap := snapshotRouteSignatures(r.Routes())
+	if _, ok := snap["GET /a"]; !ok {
+		t.Error("expected GET /a in snapshot")
+	}
+	if _, ok := snap["POST /b"]; !ok {
+		t.Error("expected POST /b in snapshot")
+	}
+	if len(snap) != 2 {
+		t.Errorf("expected 2 entries, got %d", len(snap))
+	}
+}

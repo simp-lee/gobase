@@ -17,6 +17,12 @@ import (
 func setupAPIRouter(h *UserHandler) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		if role := c.GetHeader("X-Test-Role"); role != "" {
+			c.Set("role", role)
+		}
+		c.Next()
+	})
 
 	api := r.Group("/api/v1/users")
 	api.POST("", h.Create)
@@ -33,7 +39,7 @@ func TestUserHandler_Create(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	body := `{"name":"Alice","email":"alice@example.com"}`
+	body := `{"username":"Alice","email":"alice@example.com"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -61,7 +67,7 @@ func TestUserHandler_Create_ValidationError(t *testing.T) {
 	r := setupAPIRouter(h)
 
 	// Missing required fields
-	body := `{"name":"","email":""}`
+	body := `{"username":"","email":""}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -84,8 +90,8 @@ func TestUserHandler_Create_ValidationError(t *testing.T) {
 	if resp.Errors == nil {
 		t.Fatal("expected errors map to be non-nil")
 	}
-	if _, ok := resp.Errors["name"]; !ok {
-		t.Error("expected 'name' field in errors map")
+	if _, ok := resp.Errors["username"]; !ok {
+		t.Error("expected 'username' field in errors map")
 	}
 	if _, ok := resp.Errors["email"]; !ok {
 		t.Error("expected 'email' field in errors map")
@@ -98,7 +104,7 @@ func TestUserHandler_Create_ServiceError(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	body := `{"name":"Alice","email":"alice@example.com"}`
+	body := `{"username":"Alice","email":"alice@example.com"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -114,7 +120,7 @@ func TestUserHandler_Get(t *testing.T) {
 	// Seed a user
 	svc.users[1] = &domain.User{
 		BaseModel: domain.BaseModel{ID: 1},
-		Name:      "Alice",
+		Username:  "Alice",
 		Email:     "alice@example.com",
 	}
 	h := NewUserHandler(svc)
@@ -169,12 +175,12 @@ func TestUserHandler_List(t *testing.T) {
 	svc := newMockService()
 	svc.users[1] = &domain.User{
 		BaseModel: domain.BaseModel{ID: 1},
-		Name:      "Alice",
+		Username:  "Alice",
 		Email:     "alice@example.com",
 	}
 	svc.users[2] = &domain.User{
 		BaseModel: domain.BaseModel{ID: 2},
-		Name:      "Bob",
+		Username:  "Bob",
 		Email:     "bob@example.com",
 	}
 	h := NewUserHandler(svc)
@@ -202,7 +208,7 @@ func TestUserHandler_List_PaginationParams(t *testing.T) {
 	for i := uint(1); i <= 10; i++ {
 		svc.users[i] = &domain.User{
 			BaseModel: domain.BaseModel{ID: i},
-			Name:      "User",
+			Username:  "User",
 			Email:     "user@example.com",
 		}
 	}
@@ -229,8 +235,8 @@ func TestUserHandler_List_PaginationParams(t *testing.T) {
 	if page, _ := data["current_page"].(float64); int(page) != 2 {
 		t.Errorf("expected current_page=2, got %v", data["current_page"])
 	}
-	if pageSize, _ := data["items_per_page"].(float64); int(pageSize) != 5 {
-		t.Errorf("expected items_per_page=5, got %v", data["items_per_page"])
+	if pageSize, _ := data["page_size"].(float64); int(pageSize) != 5 {
+		t.Errorf("expected page_size=5, got %v", data["page_size"])
 	}
 }
 
@@ -253,13 +259,13 @@ func TestUserHandler_Update(t *testing.T) {
 	svc := newMockService()
 	svc.users[1] = &domain.User{
 		BaseModel: domain.BaseModel{ID: 1},
-		Name:      "Alice",
+		Username:  "Alice",
 		Email:     "alice@example.com",
 	}
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	body := `{"name":"Alice Updated","email":"alice2@example.com"}`
+	body := `{"username":"Alice Updated","email":"alice2@example.com"}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/1", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -283,7 +289,7 @@ func TestUserHandler_Update_InvalidID(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	body := `{"name":"Alice","email":"alice@example.com"}`
+	body := `{"username":"Alice","email":"alice@example.com"}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/abc", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -299,7 +305,7 @@ func TestUserHandler_Update_ValidationError(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	body := `{"name":"","email":"invalid"}`
+	body := `{"username":"","email":"invalid"}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/1", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -316,8 +322,8 @@ func TestUserHandler_Update_ValidationError(t *testing.T) {
 	if resp.Errors == nil {
 		t.Fatal("expected errors map to be non-nil")
 	}
-	if _, ok := resp.Errors["name"]; !ok {
-		t.Error("expected 'name' field in errors map")
+	if _, ok := resp.Errors["username"]; !ok {
+		t.Error("expected 'username' field in errors map")
 	}
 	if _, ok := resp.Errors["email"]; !ok {
 		t.Error("expected 'email' field in errors map")
@@ -329,7 +335,7 @@ func TestUserHandler_Update_NotFound(t *testing.T) {
 	h := NewUserHandler(svc)
 	r := setupAPIRouter(h)
 
-	body := `{"name":"Alice","email":"alice@example.com"}`
+	body := `{"username":"Alice","email":"alice@example.com"}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/999", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -340,11 +346,179 @@ func TestUserHandler_Update_NotFound(t *testing.T) {
 	}
 }
 
+func TestUserHandler_Update_RoleIgnoredForNonAdmin(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{
+		BaseModel: domain.BaseModel{ID: 1},
+		Username:  "Alice",
+		Email:     "alice@example.com",
+		Role:      domain.RoleUser,
+	}
+	h := NewUserHandler(svc)
+	r := setupAPIRouter(h)
+
+	// Non-admin submits role change — production silently ignores it.
+	body := `{"username":"Alice","email":"alice@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/1", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if svc.users[1].Role != domain.RoleUser {
+		t.Fatalf("expected role to remain %q, got %q", domain.RoleUser, svc.users[1].Role)
+	}
+}
+
+func TestUserHandler_Update_RoleAdminSuccess(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{
+		BaseModel: domain.BaseModel{ID: 1},
+		Username:  "Alice",
+		Email:     "alice@example.com",
+		Role:      domain.RoleUser,
+	}
+	h := NewUserHandler(svc)
+	r := setupAPIRouter(h)
+
+	body := `{"username":"Alice","email":"alice@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/1", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-Role", "admin")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if svc.users[1].Role != domain.RoleAdmin {
+		t.Fatalf("expected role %q, got %q", domain.RoleAdmin, svc.users[1].Role)
+	}
+}
+
+func TestUserHandler_Update_StatusIgnoredForNonAdmin(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{
+		BaseModel: domain.BaseModel{ID: 1},
+		Username:  "Alice",
+		Email:     "alice@example.com",
+		Role:      domain.RoleUser,
+		Status:    domain.StatusActive,
+	}
+	h := NewUserHandler(svc)
+	r := setupAPIRouter(h)
+
+	// Non-admin submits status change — production silently ignores it.
+	body := `{"username":"Alice","email":"alice@example.com","status":"disabled"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/1", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if svc.users[1].Status != domain.StatusActive {
+		t.Fatalf("expected status to remain %q, got %q", domain.StatusActive, svc.users[1].Status)
+	}
+}
+
+func TestUserHandler_Update_StatusAdminSuccess(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{
+		BaseModel: domain.BaseModel{ID: 1},
+		Username:  "Alice",
+		Email:     "alice@example.com",
+		Role:      domain.RoleUser,
+		Status:    domain.StatusActive,
+	}
+	h := NewUserHandler(svc)
+	r := setupAPIRouter(h)
+
+	body := `{"username":"Alice","email":"alice@example.com","status":"disabled"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/1", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-Role", "admin")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if svc.users[1].Status != domain.StatusDisabled {
+		t.Fatalf("expected status %q, got %q", domain.StatusDisabled, svc.users[1].Status)
+	}
+}
+
+func TestUserHandler_List_StatusFilterParam(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{
+		BaseModel: domain.BaseModel{ID: 1},
+		Username:  "Alice",
+		Email:     "alice@example.com",
+		Status:    domain.StatusActive,
+	}
+	h := NewUserHandler(svc)
+	r := setupAPIRouter(h)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users?status=active", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if got := svc.lastListReq.Filter["status"]; got != "active" {
+		t.Errorf("expected filter[status]=%q, got %q", "active", got)
+	}
+}
+
+func TestUserHandler_List_SortByStatus(t *testing.T) {
+	svc := newMockService()
+	svc.users[1] = &domain.User{
+		BaseModel: domain.BaseModel{ID: 1},
+		Username:  "Alice",
+		Email:     "alice@example.com",
+		Status:    domain.StatusActive,
+	}
+	h := NewUserHandler(svc)
+	r := setupAPIRouter(h)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users?sort=status:asc", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if got := svc.lastListReq.Sort; got != "status:asc" {
+		t.Errorf("expected sort=%q, got %q", "status:asc", got)
+	}
+}
+
+func TestUserHandler_Update_InvalidStatus(t *testing.T) {
+	svc := newMockService()
+	h := NewUserHandler(svc)
+	r := setupAPIRouter(h)
+
+	body := `{"username":"Alice","email":"alice@example.com","status":"archived"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/1", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", w.Code)
+	}
+}
+
 func TestUserHandler_Delete(t *testing.T) {
 	svc := newMockService()
 	svc.users[1] = &domain.User{
 		BaseModel: domain.BaseModel{ID: 1},
-		Name:      "Alice",
+		Username:  "Alice",
 		Email:     "alice@example.com",
 	}
 	h := NewUserHandler(svc)

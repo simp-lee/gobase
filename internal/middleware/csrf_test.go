@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const testCSRFSecret = "test-secret-key-for-csrf"
+const testCSRFSecret = "test-secret-key-for-csrf-minimum32!"
 
 func setupCSRFRouter() *gin.Engine {
 	r := gin.New()
@@ -97,6 +98,53 @@ func TestCSRF_GET_CookieAttributes(t *testing.T) {
 	}
 	if found.SameSite != http.SameSiteStrictMode {
 		t.Errorf("expected SameSite=Strict, got %v", found.SameSite)
+	}
+	if found.Secure {
+		t.Error("expected Secure=false for plain HTTP request")
+	}
+}
+
+func TestCSRF_GET_CookieSecure_WhenTLSRequest(t *testing.T) {
+	r := setupCSRFRouter()
+	req := httptest.NewRequest(http.MethodGet, "/form", nil)
+	req.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	var found *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "_csrf_token" {
+			found = c
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("_csrf_token cookie not found")
+	}
+	if !found.Secure {
+		t.Error("expected Secure=true for TLS request")
+	}
+}
+
+func TestCSRF_GET_CookieSecure_WhenForwardedHTTPS(t *testing.T) {
+	r := setupCSRFRouter()
+	req := httptest.NewRequest(http.MethodGet, "/form", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	var found *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "_csrf_token" {
+			found = c
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("_csrf_token cookie not found")
+	}
+	if !found.Secure {
+		t.Error("expected Secure=true when forwarded proto is https")
 	}
 }
 
@@ -358,6 +406,78 @@ func TestSetCSRFToken_NoCookie_DoesNothing(t *testing.T) {
 	}
 }
 
+// --- SetCSRFTokenWithSecret tests -------------------------------------------
+
+func TestSetCSRFTokenWithSecret_NoOp_WhenAlreadyInContext(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	c.Set(csrfContextKey, "existing-token")
+
+	validTok := mustGenerateToken(testCSRFSecret)
+	c.Request.AddCookie(&http.Cookie{Name: csrfCookieName, Value: validTok})
+
+	SetCSRFTokenWithSecret(c, testCSRFSecret)
+
+	if got := GetCSRFToken(c); got != "existing-token" {
+		t.Errorf("expected existing-token (no overwrite), got %q", got)
+	}
+}
+
+func TestSetCSRFTokenWithSecret_NoOp_EmptySecret(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	validTok := mustGenerateToken(testCSRFSecret)
+	c.Request.AddCookie(&http.Cookie{Name: csrfCookieName, Value: validTok})
+
+	SetCSRFTokenWithSecret(c, "")
+	if got := GetCSRFToken(c); got != "" {
+		t.Errorf("expected empty token for empty secret, got %q", got)
+	}
+
+	SetCSRFTokenWithSecret(c, "   ")
+	if got := GetCSRFToken(c); got != "" {
+		t.Errorf("expected empty token for whitespace secret, got %q", got)
+	}
+}
+
+func TestSetCSRFTokenWithSecret_NoOp_NoCookie(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+	SetCSRFTokenWithSecret(c, testCSRFSecret)
+
+	if got := GetCSRFToken(c); got != "" {
+		t.Errorf("expected empty token when no cookie, got %q", got)
+	}
+}
+
+func TestSetCSRFTokenWithSecret_NoOp_InvalidHMAC(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	// Cookie with a token signed by a different secret.
+	badTok := mustGenerateToken("different-secret-that-is-long-enough-32")
+	c.Request.AddCookie(&http.Cookie{Name: csrfCookieName, Value: badTok})
+
+	SetCSRFTokenWithSecret(c, testCSRFSecret)
+
+	if got := GetCSRFToken(c); got != "" {
+		t.Errorf("expected empty token for invalid HMAC, got %q", got)
+	}
+}
+
+func TestSetCSRFTokenWithSecret_Success_ValidCookie(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	validTok := mustGenerateToken(testCSRFSecret)
+	c.Request.AddCookie(&http.Cookie{Name: csrfCookieName, Value: validTok})
+
+	SetCSRFTokenWithSecret(c, testCSRFSecret)
+
+	if got := GetCSRFToken(c); got != validTok {
+		t.Errorf("expected %q, got %q", validTok, got)
+	}
+}
+
 func TestValidToken(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -389,6 +509,122 @@ func TestTokensMatch(t *testing.T) {
 	}
 	if tokensMatch(token, "different") {
 		t.Error("different tokens should not match")
+	}
+}
+
+func TestValidateCSRFToken(t *testing.T) {
+	validTokenValue := mustGenerateToken(testCSRFSecret)
+
+	tests := []struct {
+		name   string
+		token  string
+		secret string
+		want   bool
+	}{
+		{name: "valid token", token: validTokenValue, secret: testCSRFSecret, want: true},
+		{name: "invalid token", token: "invalid-token", secret: testCSRFSecret, want: false},
+		{name: "empty token", token: "", secret: testCSRFSecret, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ValidateCSRFToken(tt.token, tt.secret); got != tt.want {
+				t.Errorf("ValidateCSRFToken() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateCSRFTokenPair(t *testing.T) {
+	validTokenValue := mustGenerateToken(testCSRFSecret)
+
+	tests := []struct {
+		name         string
+		cookieToken  string
+		requestToken string
+		secret       string
+		want         bool
+	}{
+		{
+			name:         "valid token pair",
+			cookieToken:  validTokenValue,
+			requestToken: validTokenValue,
+			secret:       testCSRFSecret,
+			want:         true,
+		},
+		{
+			name:         "invalid token pair",
+			cookieToken:  validTokenValue,
+			requestToken: "invalid-token",
+			secret:       testCSRFSecret,
+			want:         false,
+		},
+		{
+			name:         "empty token pair",
+			cookieToken:  "",
+			requestToken: "",
+			secret:       testCSRFSecret,
+			want:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ValidateCSRFTokenPair(tt.cookieToken, tt.requestToken, tt.secret); got != tt.want {
+				t.Errorf("ValidateCSRFTokenPair() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCSRF_EmptySecret_Returns500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(CSRF(""))
+	r.GET("/", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for empty secret, got %d", w.Code)
+	}
+}
+
+func TestCSRF_WhitespaceSecret_Returns500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(CSRF("   "))
+	r.GET("/", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for whitespace-only secret, got %d", w.Code)
+	}
+}
+
+func TestCSRF_ShortSecret_Returns500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(CSRF("short-secret"))
+	r.GET("/", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for short secret, got %d", w.Code)
 	}
 }
 
@@ -450,6 +686,98 @@ func TestCSRF_APIRoute_ExemptWhenMiddlewareNotApplied(t *testing.T) {
 			t.Errorf("expected 403, got %d", w.Code)
 		}
 	})
+}
+
+func TestRequestIsSecure(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(r *http.Request)
+		secure bool
+	}{
+		{"nil request", nil, false},
+		{"plain HTTP", func(r *http.Request) {}, false},
+		{"TLS connection", func(r *http.Request) {
+			r.TLS = &tls.ConnectionState{}
+		}, true},
+		{"X-Forwarded-Proto https", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "https")
+		}, true},
+		{"X-Forwarded-Proto https,http", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "https,http")
+		}, true},
+		{"X-Forwarded-Proto first non-empty with whitespace", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "   ,   https  , http")
+		}, true},
+		{"X-Forwarded-Proto first value http then https", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "http,https")
+		}, false},
+		{"X-Forwarded-Proto HTTPS uppercase", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "HTTPS")
+		}, true},
+		{"X-Forwarded-Proto http", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Proto", "http")
+		}, false},
+		{"X-Forwarded-Ssl on", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Ssl", "on")
+		}, true},
+		{"X-Forwarded-Ssl ON uppercase", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Ssl", "ON")
+		}, true},
+		{"X-Forwarded-Ssl off", func(r *http.Request) {
+			r.Header.Set("X-Forwarded-Ssl", "off")
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setup == nil {
+				if got := requestIsSecure(nil); got != tt.secure {
+					t.Errorf("requestIsSecure(nil) = %v, want %v", got, tt.secure)
+				}
+				return
+			}
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			tt.setup(req)
+			if got := requestIsSecure(req); got != tt.secure {
+				t.Errorf("requestIsSecure() = %v, want %v", got, tt.secure)
+			}
+		})
+	}
+}
+
+func TestCSRF_CookieSecure_BasedOnRequest(t *testing.T) {
+	r := setupCSRFRouter()
+
+	// Plain HTTP request — cookie Secure should be false.
+	req := httptest.NewRequest(http.MethodGet, "/form", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	for _, c := range w.Result().Cookies() {
+		if c.Name == csrfCookieName {
+			if c.Secure {
+				t.Error("expected Secure=false for plain HTTP request")
+			}
+		}
+	}
+
+	// Request with X-Forwarded-Proto: https — cookie Secure should be true.
+	req2 := httptest.NewRequest(http.MethodGet, "/form", nil)
+	req2.Header.Set("X-Forwarded-Proto", "https")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+
+	var found bool
+	for _, c := range w2.Result().Cookies() {
+		if c.Name == csrfCookieName {
+			found = true
+			if !c.Secure {
+				t.Error("expected Secure=true when X-Forwarded-Proto is https")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected _csrf_token cookie to be set")
+	}
 }
 
 func mustGenerateToken(secret string) string {

@@ -11,6 +11,18 @@ import (
 	"gorm.io/gorm"
 )
 
+type legacyUser struct {
+	domain.BaseModel
+	Username     string `gorm:"size:100;not null"`
+	Email        string `gorm:"size:255;uniqueIndex;not null"`
+	PasswordHash string `gorm:"size:255"`
+	Role         string `gorm:"size:20;not null;default:'user';check:chk_user_role,role IN ('admin','user')"`
+}
+
+func (legacyUser) TableName() string {
+	return "users"
+}
+
 // setupTestDB creates an in-memory SQLite database with the User table.
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -29,7 +41,8 @@ func TestCreateAndGetByID(t *testing.T) {
 	repo := NewUserRepository(db)
 	ctx := context.Background()
 
-	user := &domain.User{Name: "Alice", Email: "alice@example.com"}
+	// Status left empty intentionally — verifies DB default fills "active".
+	user := &domain.User{Username: "Alice", Email: "alice@example.com"}
 	if err := repo.Create(ctx, user); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -41,8 +54,42 @@ func TestCreateAndGetByID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
 	}
-	if got.Name != "Alice" || got.Email != "alice@example.com" {
-		t.Errorf("got %+v; want Name=Alice, Email=alice@example.com", got)
+	if got.Username != "Alice" || got.Email != "alice@example.com" {
+		t.Errorf("got %+v; want Username=Alice, Email=alice@example.com", got)
+	}
+	if got.Status != domain.StatusActive {
+		t.Errorf("Status=%q; want %q", got.Status, domain.StatusActive)
+	}
+}
+
+func TestAutoMigrate_LegacyUsersDefaultToActiveStatus(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+
+	if err := db.AutoMigrate(&legacyUser{}); err != nil {
+		t.Fatalf("migrate legacy users table: %v", err)
+	}
+	if err := db.Create(&legacyUser{
+		Username: "Legacy",
+		Email:    "legacy@example.com",
+		Role:     domain.RoleUser,
+	}).Error; err != nil {
+		t.Fatalf("insert legacy user: %v", err)
+	}
+
+	if err := db.AutoMigrate(&domain.User{}); err != nil {
+		t.Fatalf("upgrade users table: %v", err)
+	}
+
+	repo := NewUserRepository(db)
+	got, err := repo.GetByEmail(context.Background(), "legacy@example.com")
+	if err != nil {
+		t.Fatalf("GetByEmail: %v", err)
+	}
+	if got.Status != domain.StatusActive {
+		t.Fatalf("Status=%q; want %q", got.Status, domain.StatusActive)
 	}
 }
 
@@ -61,7 +108,7 @@ func TestGetByEmail(t *testing.T) {
 	repo := NewUserRepository(db)
 	ctx := context.Background()
 
-	user := &domain.User{Name: "Alice", Email: "alice@example.com"}
+	user := &domain.User{Username: "Alice", Email: "alice@example.com"}
 	if err := repo.Create(ctx, user); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -70,8 +117,8 @@ func TestGetByEmail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByEmail: %v", err)
 	}
-	if got.Name != "Alice" || got.Email != "alice@example.com" {
-		t.Errorf("got %+v; want Name=Alice, Email=alice@example.com", got)
+	if got.Username != "Alice" || got.Email != "alice@example.com" {
+		t.Errorf("got %+v; want Username=Alice, Email=alice@example.com", got)
 	}
 	if got.ID != user.ID {
 		t.Errorf("ID=%d; want %d", got.ID, user.ID)
@@ -93,12 +140,12 @@ func TestCreate_DuplicateEmail(t *testing.T) {
 	repo := NewUserRepository(db)
 	ctx := context.Background()
 
-	u1 := &domain.User{Name: "Alice", Email: "dup@example.com"}
+	u1 := &domain.User{Username: "Alice", Email: "dup@example.com"}
 	if err := repo.Create(ctx, u1); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
 
-	u2 := &domain.User{Name: "Bob", Email: "dup@example.com"}
+	u2 := &domain.User{Username: "Bob", Email: "dup@example.com"}
 	err := repo.Create(ctx, u2)
 	if !domain.IsAlreadyExists(err) {
 		t.Errorf("expected ErrAlreadyExists, got %v", err)
@@ -110,19 +157,19 @@ func TestUpdate(t *testing.T) {
 	repo := NewUserRepository(db)
 	ctx := context.Background()
 
-	user := &domain.User{Name: "Alice", Email: "alice@example.com"}
+	user := &domain.User{Username: "Alice", Email: "alice@example.com"}
 	if err := repo.Create(ctx, user); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	user.Name = "Alice Updated"
+	user.Username = "Alice Updated"
 	if err := repo.Update(ctx, user); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
 	got, _ := repo.GetByID(ctx, user.ID)
-	if got.Name != "Alice Updated" {
-		t.Errorf("Name=%q; want Alice Updated", got.Name)
+	if got.Username != "Alice Updated" {
+		t.Errorf("Username=%q; want Alice Updated", got.Username)
 	}
 }
 
@@ -131,7 +178,7 @@ func TestDelete(t *testing.T) {
 	repo := NewUserRepository(db)
 	ctx := context.Background()
 
-	user := &domain.User{Name: "Alice", Email: "alice@example.com"}
+	user := &domain.User{Username: "Alice", Email: "alice@example.com"}
 	if err := repo.Create(ctx, user); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -163,8 +210,8 @@ func TestList_Basic(t *testing.T) {
 
 	for i := 1; i <= 5; i++ {
 		u := &domain.User{
-			Name:  "User" + string(rune('A'-1+i)),
-			Email: "user" + string(rune('a'-1+i)) + "@example.com",
+			Username: "User" + string(rune('A'-1+i)),
+			Email:    "user" + string(rune('a'-1+i)) + "@example.com",
 		}
 		if err := repo.Create(ctx, u); err != nil {
 			t.Fatalf("Create user %d: %v", i, err)
@@ -197,9 +244,9 @@ func TestList_Filter(t *testing.T) {
 	ctx := context.Background()
 
 	users := []domain.User{
-		{Name: "Alice", Email: "alice@example.com"},
-		{Name: "Bob", Email: "bob@example.com"},
-		{Name: "Charlie", Email: "charlie@example.com"},
+		{Username: "Alice", Email: "alice@example.com"},
+		{Username: "Bob", Email: "bob@example.com"},
+		{Username: "Charlie", Email: "charlie@example.com"},
 	}
 	for i := range users {
 		if err := repo.Create(ctx, &users[i]); err != nil {
@@ -211,7 +258,7 @@ func TestList_Filter(t *testing.T) {
 		Page:     1,
 		PageSize: 20,
 		Sort:     "id:asc",
-		Filter:   map[string]string{"name": "Alice"},
+		Filter:   map[string]string{"username": "Alice"},
 	})
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -219,7 +266,7 @@ func TestList_Filter(t *testing.T) {
 	if result.TotalItems != 1 {
 		t.Errorf("TotalItems=%d; want 1", result.TotalItems)
 	}
-	if len(result.Items) != 1 || result.Items[0].Name != "Alice" {
+	if len(result.Items) != 1 || result.Items[0].Username != "Alice" {
 		t.Errorf("expected Alice, got %+v", result.Items)
 	}
 }
@@ -251,8 +298,8 @@ func TestList_Pagination25(t *testing.T) {
 
 	for i := 1; i <= 25; i++ {
 		u := &domain.User{
-			Name:  fmt.Sprintf("User%02d", i),
-			Email: fmt.Sprintf("user%02d@example.com", i),
+			Username: fmt.Sprintf("User%02d", i),
+			Email:    fmt.Sprintf("user%02d@example.com", i),
 		}
 		if err := repo.Create(ctx, u); err != nil {
 			t.Fatalf("Create user %d: %v", i, err)
@@ -280,11 +327,11 @@ func TestList_Pagination25(t *testing.T) {
 		t.Errorf("CurrentPage=%d; want 2", result.CurrentPage)
 	}
 	// Page 2 with id:asc should start at User11 (ID offset 11)
-	if result.Items[0].Name != "User11" {
-		t.Errorf("first item Name=%q; want User11", result.Items[0].Name)
+	if result.Items[0].Username != "User11" {
+		t.Errorf("first item Username=%q; want User11", result.Items[0].Username)
 	}
-	if result.Items[9].Name != "User20" {
-		t.Errorf("last item Name=%q; want User20", result.Items[9].Name)
+	if result.Items[9].Username != "User20" {
+		t.Errorf("last item Username=%q; want User20", result.Items[9].Username)
 	}
 }
 
@@ -295,7 +342,7 @@ func TestList_Sort(t *testing.T) {
 
 	names := []string{"Charlie", "Alice", "Bob"}
 	for _, n := range names {
-		u := &domain.User{Name: n, Email: strings.ToLower(n) + "@example.com"}
+		u := &domain.User{Username: n, Email: strings.ToLower(n) + "@example.com"}
 		if err := repo.Create(ctx, u); err != nil {
 			t.Fatalf("Create %s: %v", n, err)
 		}
@@ -307,8 +354,8 @@ func TestList_Sort(t *testing.T) {
 		wantFirst string
 		wantLast  string
 	}{
-		{"name_asc", "name:asc", "Alice", "Charlie"},
-		{"name_desc", "name:desc", "Charlie", "Alice"},
+		{"username_asc", "username:asc", "Alice", "Charlie"},
+		{"username_desc", "username:desc", "Charlie", "Alice"},
 		{"email_asc", "email:asc", "Alice", "Charlie"},
 		{"id_desc", "id:desc", "Bob", "Charlie"},
 	}
@@ -323,15 +370,115 @@ func TestList_Sort(t *testing.T) {
 			if err != nil {
 				t.Fatalf("List: %v", err)
 			}
-			if result.Items[0].Name != tt.wantFirst {
-				t.Errorf("first=%q; want %q", result.Items[0].Name, tt.wantFirst)
+			if result.Items[0].Username != tt.wantFirst {
+				t.Errorf("first=%q; want %q", result.Items[0].Username, tt.wantFirst)
 			}
 			last := result.Items[len(result.Items)-1]
-			if last.Name != tt.wantLast {
-				t.Errorf("last=%q; want %q", last.Name, tt.wantLast)
+			if last.Username != tt.wantLast {
+				t.Errorf("last=%q; want %q", last.Username, tt.wantLast)
 			}
 		})
 	}
+}
+
+func TestList_FilterByStatus(t *testing.T) {
+	db := setupTestDB(t)
+	repo := NewUserRepository(db)
+	ctx := context.Background()
+
+	users := []domain.User{
+		{Username: "Active1", Email: "a1@example.com", Status: domain.StatusActive},
+		{Username: "Active2", Email: "a2@example.com", Status: domain.StatusActive},
+		{Username: "Disabled1", Email: "d1@example.com", Status: domain.StatusDisabled},
+		{Username: "Pending1", Email: "p1@example.com", Status: domain.StatusPending},
+	}
+	for i := range users {
+		if err := repo.Create(ctx, &users[i]); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	tests := []struct {
+		name      string
+		status    string
+		wantCount int64
+	}{
+		{"active only", domain.StatusActive, 2},
+		{"disabled only", domain.StatusDisabled, 1},
+		{"pending only", domain.StatusPending, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := repo.List(ctx, domain.PageRequest{
+				Page:     1,
+				PageSize: 20,
+				Sort:     "id:asc",
+				Filter:   map[string]string{"status": tt.status},
+			})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if result.TotalItems != tt.wantCount {
+				t.Errorf("TotalItems=%d; want %d", result.TotalItems, tt.wantCount)
+			}
+			for _, u := range result.Items {
+				if u.Status != tt.status {
+					t.Errorf("got user with status=%q; want %q", u.Status, tt.status)
+				}
+			}
+		})
+	}
+}
+
+func TestList_SortByStatus(t *testing.T) {
+	db := setupTestDB(t)
+	repo := NewUserRepository(db)
+	ctx := context.Background()
+
+	// Create users with different statuses; SQLite sorts strings lexicographically.
+	users := []domain.User{
+		{Username: "Pending", Email: "p@example.com", Status: domain.StatusPending},
+		{Username: "Active", Email: "a@example.com", Status: domain.StatusActive},
+		{Username: "Disabled", Email: "d@example.com", Status: domain.StatusDisabled},
+	}
+	for i := range users {
+		if err := repo.Create(ctx, &users[i]); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	t.Run("status_asc", func(t *testing.T) {
+		result, err := repo.List(ctx, domain.PageRequest{
+			Page: 1, PageSize: 20, Sort: "status:asc",
+		})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		// Lexicographic: active < disabled < pending
+		if result.Items[0].Status != domain.StatusActive {
+			t.Errorf("first status=%q; want %q", result.Items[0].Status, domain.StatusActive)
+		}
+		last := result.Items[len(result.Items)-1]
+		if last.Status != domain.StatusPending {
+			t.Errorf("last status=%q; want %q", last.Status, domain.StatusPending)
+		}
+	})
+
+	t.Run("status_desc", func(t *testing.T) {
+		result, err := repo.List(ctx, domain.PageRequest{
+			Page: 1, PageSize: 20, Sort: "status:desc",
+		})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if result.Items[0].Status != domain.StatusPending {
+			t.Errorf("first status=%q; want %q", result.Items[0].Status, domain.StatusPending)
+		}
+		last := result.Items[len(result.Items)-1]
+		if last.Status != domain.StatusActive {
+			t.Errorf("last status=%q; want %q", last.Status, domain.StatusActive)
+		}
+	})
 }
 
 func TestList_FilterLike(t *testing.T) {
@@ -340,9 +487,9 @@ func TestList_FilterLike(t *testing.T) {
 	ctx := context.Background()
 
 	users := []domain.User{
-		{Name: "Alice Smith", Email: "alice@example.com"},
-		{Name: "Alice Jones", Email: "alice.jones@example.com"},
-		{Name: "Bob Smith", Email: "bob@example.com"},
+		{Username: "Alice Smith", Email: "alice@example.com"},
+		{Username: "Alice Jones", Email: "alice.jones@example.com"},
+		{Username: "Bob Smith", Email: "bob@example.com"},
 	}
 	for i := range users {
 		if err := repo.Create(ctx, &users[i]); err != nil {
@@ -350,12 +497,12 @@ func TestList_FilterLike(t *testing.T) {
 		}
 	}
 
-	// __like on name
+	// __like on username
 	result, err := repo.List(ctx, domain.PageRequest{
 		Page:     1,
 		PageSize: 20,
 		Sort:     "id:asc",
-		Filter:   map[string]string{"name__like": "Alice"},
+		Filter:   map[string]string{"username__like": "Alice"},
 	})
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -383,7 +530,7 @@ func TestList_FilterLike(t *testing.T) {
 		Page:     1,
 		PageSize: 20,
 		Sort:     "id:asc",
-		Filter:   map[string]string{"name__like": "Zara"},
+		Filter:   map[string]string{"username__like": "Zara"},
 	})
 	if err != nil {
 		t.Fatalf("List: %v", err)

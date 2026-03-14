@@ -8,6 +8,8 @@ GoBase 是一套**轻量、AI 编程友好**的 Go Web 开发框架 Starter Kit�
 - **按模块垂直切片** — 每个业务模块（如 `user`）内含 handler / service / repository / DTO，职责自包含
 - **REST API + 全栈 Web** — JSON API 与 Go Templates + htmx 页面并存，共享同一套 Service 层
 - **内置分页 / 过滤 / 排序** — 泛型 `PageResult[T]`，GORM Scope 可复用，URL 参数即查询条件
+- **条件启用 JWT 认证 + RBAC 授权** — `auth.enabled` 开关控制；启用后自动注册 auth 模块（登录 / 注册 / 登出 / Token 刷新），可选启用 `auth.rbac.enabled` 细粒度权限控制
+- **页面 / API 认证边界** — API 路由使用 Bearer Token 认证（public_paths 豁免）；受保护页面路由通过 Cookie→Bearer 自动提升，写操作额外校验 Authorization header
 - **统一错误处理** — 业务错误码 → HTTP 状态码自动映射，字段级验证错误明细
 - **结构化日志** — `log/slog` + Context Handler，请求 ID 全链路自动关联
 - **CSRF 保护** — HMAC-SHA256 签名 Token，页面路由自动校验，API 路由豁免
@@ -80,13 +82,18 @@ gobase/
 ├── data/                        # SQLite 数据库文件存放目录（.gitignore）
 ├── internal/
 │   ├── app/
-│   │   ├── app.go               # 应用核心：依赖组装、生命周期管理、优雅关停
+│   │   ├── app.go               # 应用核心：依赖组装、Gin 引擎初始化
+│   │   ├── auth.go              # 条件启用 JWT / RBAC、auth 中间件链组装
+│   │   ├── lifecycle.go          # 服务启停、优雅关停与 AutoMigrate 入口
 │   │   ├── errors.go            # 共享错误响应工具（Accept-based HTML/JSON 分流）
+│   │   ├── middleware.go        # 中间件链构建（CORS、限流、缓存等）
 │   │   ├── module.go            # Module 接口定义（自注册路由）
 │   │   ├── routes.go            # 路由注册：Module 循环注册、静态资源、健康检查
-│   │   └── template.go          # 模板渲染器：layout/partial 组合，debug 热加载
+│   │   ├── template.go          # 模板渲染器：layout/partial 组合，debug 热加载
+│   │   └── wire.go              # 依赖注入：基础设施初始化、业务模块组装
 │   ├── config/
 │   │   ├── config.go            # 配置结构体定义、YAML 加载、环境变量覆盖
+│   │   ├── config_secrets.go     # 密钥强度校验、占位符检测（JWT/CSRF）
 │   │   ├── database.go          # 数据库初始化：驱动选择、连接池配置
 │   │   └── logger.go            # slog 日志初始化：级别、格式（text/json）
 │   ├── domain/
@@ -94,16 +101,22 @@ gobase/
 │   │   ├── errors.go            # 业务错误码体系：AppError、错误判断辅助函数
 │   │   └── user.go              # User 实体 + UserRepository / UserService 接口
 │   ├── middleware/               # 注：CORS / Logger / Recovery / RequestID 已迁移至 ginx 库
-│   │   ├── csrf.go              # CSRF 防护中间件（HMAC-SHA256）
-│   │   └── csrf_test.go         # CSRF 中间件测试
+│   │   ├── auth.go              # RequireAdmin 中间件（角色检查）
+│   │   └── csrf.go              # CSRF 防护中间件（HMAC-SHA256）
 │   ├── module/
-│   │   └── user/                # ★ 示例模块 — 完整 CRUD
+│   │   ├── auth/                # Auth 模块 — 登录 / 注册 / 登出 / Token 刷新
+│   │   │   ├── dto.go           # 请求/响应 DTO（LoginRequest / RegisterRequest / TokenResponse）
+│   │   │   ├── handler.go       # REST API + 页面 Handler（/api/v1/auth/*、/login、/register）
+│   │   │   ├── module.go        # AuthModule — Module 接口实现，注册路由
+│   │   │   └── service.go       # 认证业务逻辑（JWT 签发、密码校验、防枚举）
+│   │   └── user/                # ★ 示例模块 — 完整 CRUD（含 role / status 管理）
+│   │       ├── authz.go         # 请求者权限判断（admin 检测、字段更新授权）
 │   │       ├── dto.go           # 请求 DTO（CreateUserRequest / UpdateUserRequest）
 │   │       ├── handler.go       # REST API Handler（/api/v1/users）
 │   │       ├── module.go        # UserModule — Module 接口实现，注册路由
 │   │       ├── page_handler.go  # 页面 Handler（htmx 表单交互）
 │   │       ├── repository.go    # GORM 数据访问实现
-│   │       └── service.go       # 业务逻辑实现
+│   │       └── service.go       # 业务逻辑实现（含 role / status 权限控制）
 │   └── pkg/
 │       ├── ctxlog.go            # Context Handler：请求 ID 自动注入日志
 │       ├── pagination.go        # 分页/排序/过滤 GORM Scope + PageResult 构造
@@ -118,8 +131,9 @@ gobase/
 │   └── templates/
 │       ├── layouts/base.html    # 页面基础布局（head、nav、main、toast 容器、脚本）
 │       ├── partials/            # 可复用模板片段（导航栏、分页、toast）
-│       ├── errors/              # 错误页面（404、500）
+│       ├── errors/              # 错误页面（400、404、500）
 │       ├── home.html            # 首页
+│       ├── auth/                # Auth 模块页面（登录、注册）
 │       └── user/                # User 模块页面（列表、表单）
 ├── .agents/
 │   └── skills/                  # AI Agent 技能文档
@@ -258,13 +272,17 @@ server:
   host: "127.0.0.1"
   port: 8080
   mode: "debug"                    # debug | release
-  csrf_secret: ""                        # required in release mode; use >=32 chars
+  csrf_secret: ""                  # required in release mode; use >=32 chars
   cors:
-    allow_origins: []               # release 默认拒绝跨域；显式配置后才放行
+    allow_origins: []              # release 默认拒绝跨域；显式配置后才放行
+  rate_limit:
+    enabled: true                  # 全局限流开关
+    rps: 100                       # 每秒请求数（支持小数，向上取整，最小 1）
+    burst: 200                     # 突发容量
   cache:
-    enabled: false                   # 启用 HTTP 响应缓存
-    ttl: "5m"                        # 缓存条目生存时间
-    max_size: 1000                   # 最大缓存条目数
+    enabled: false                 # 启用 HTTP 响应缓存
+    ttl: "5m"                      # 缓存条目生存时间
+    max_size: 1000                 # 最大缓存条目数
 
 database:
   driver: "sqlite"                 # sqlite | postgres
@@ -276,19 +294,55 @@ database:
     user: "postgres"
     password: ""
     dbname: "gobase"
-    sslmode: "disable"
+    sslmode: "require"
   pool:
     max_idle_conns: 10             # 最大空闲连接数（默认 10）
     max_open_conns: 100            # 最大打开连接数（默认 100）
     conn_max_lifetime: "1h"        # 连接最大存活时间（time.Duration 格式）
+    conn_max_idle_time: "10m"      # 空闲连接最大存活时间
+
+auth:
+  enabled: false                   # 认证总开关；关闭时不注册 auth 模块和中间件
+  jwt_secret: ""                   # JWT 签名密钥（>=32 字符；release 模式要求 >=3 类字符）
+  token_expiry: "24h"              # Token 有效期（time.Duration 格式）
+  cookie_secure: false             # 是否强制认证 Cookie 仅在 HTTPS 发送（生产建议 true）
+  public_paths:                    # 免认证 API 路径白名单
+    - "/api/v1/auth/login"
+    - "/api/v1/auth/register"
+  rbac:                            # 可选 RBAC 细粒度授权
+    enabled: false                 # 需 auth.enabled=true 才可启用
+    cache:
+      role_ttl: "5m"
+      user_role_ttl: "5m"
+      permission_ttl: "5m"
+      max_role_entries: 1000
+      max_user_entries: 5000
+      max_permission_entries: 10000
 
 log:
   level: "debug"                   # debug | info | warn | error
   format: "text"                   # text | json
-
 ```
 
 如需局域网设备访问，可将 `host` 改为 `0.0.0.0`；请仅在可信网络中使用，避免在 `debug` 模式下对公网暴露服务。
+
+### 认证配置说明
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `auth.enabled` | 认证总开关；`false` 时不注册 auth 模块、不加载 JWT/RBAC 中间件 | `false` |
+| `auth.jwt_secret` | JWT 签名密钥；启用后必填，>=32 字符；release 模式要求包含 >=3 类字符 | `""` |
+| `auth.token_expiry` | Token 有效期（`time.Duration` 格式，如 `24h`） | `"24h"` |
+| `auth.cookie_secure` | 强制认证 Cookie 的 `Secure` 标志；release 模式必须为 `true` | `false` |
+| `auth.public_paths` | 免认证 API 路径白名单 | 见上方示例 |
+| `auth.rbac.enabled` | RBAC 细粒度授权开关；需 `auth.enabled=true` | `false` |
+| `auth.rbac.cache.*` | RBAC 缓存 TTL 和容量配置 | 见上方示例 |
+
+启用认证后，框架自动：
+1. 创建 `jwt.Service` 和（可选）`rbac.Service`
+2. 注册 auth 模块（登录 / 注册 / 登出 / Token 刷新路由）
+3. 在中间件链中添加 API 和受保护页面的认证检查
+4. 若 RBAC 启用，为 `/api/v1/users` 按 HTTP 方法注入权限检查（`users:read` / `create` / `update` / `delete`）
 
 ### CORS 配置建议（开发 / 生产）
 
@@ -345,6 +399,54 @@ APP__SERVER__PORT=9090 APP__LOG__LEVEL=info go run ./cmd/server -config configs/
 
 > **提示**：SQLite 为嵌入式数据库，连接池参数对其影响较小；切换到 PostgreSQL 时应根据服务器资源合理调整。
 
+## 认证与授权
+
+### 条件启用
+
+认证功能通过 `auth.enabled` 配置开关控制。关闭时（默认），不会注册 auth 模块和中间件，应用以无认证模式运行。启用 RBAC 需同时设置 `auth.enabled=true` 和 `auth.rbac.enabled=true`。
+
+### Auth 路由
+
+启用后自动注册以下路由：
+
+| 路由 | 方法 | 说明 |
+|------|------|------|
+| `/api/v1/auth/login` | POST | 用户登录，返回 JWT Token 并设置 `access_token` Cookie |
+| `/api/v1/auth/register` | POST | 用户注册 |
+| `/api/v1/auth/logout` | POST | 登出，撤销当前 Token |
+| `/api/v1/auth/refresh` | POST | 刷新 Token |
+| `/login` | GET | 登录页面（Go 模板渲染） |
+| `/register` | GET | 注册页面（Go 模板渲染） |
+
+其中 `/api/v1/auth/login` 和 `/api/v1/auth/register` 在 `public_paths` 白名单中，无需认证即可访问。
+
+### 页面 / API 认证边界
+
+认证中间件对 API 路由和页面路由采用不同策略：
+
+- **API 路由**（`/api/*`）：不在 `public_paths` 白名单中的路由一律要求 Bearer Token（通过 `ginx.Auth` 校验 JWT）
+- **受保护页面路由**（如 `/users/*`）：
+  - 自动将 `access_token` Cookie 提升为 `Authorization: Bearer` 头（Cookie→Bearer promotion）
+  - GET 请求通过 `ginx.Auth` 校验 JWT
+  - 写操作（POST/PUT/PATCH/DELETE）额外要求显式 `Authorization` header + CSRF Token 校验
+  - 认证通过后桥接 auth 上下文供业务层使用
+- **公共页面路由**（如 `/`）：可选注入认证上下文，未登录用户也可正常访问
+
+### RBAC 权限控制
+
+启用 RBAC 后，框架为 `/api/v1/users` 路由组按 HTTP 方法自动注入权限检查：
+
+| HTTP 方法 | 所需权限 |
+|-----------|----------|
+| GET | `users:read` |
+| POST | `users:create` |
+| PUT | `users:update` |
+| DELETE | `users:delete` |
+
+新增业务模块时可参照此模式，使用 `ginx.RequirePermission` 为资源路由组添加 RBAC 检查。
+
+> **注意**：第三方登录（OAuth / 社交登录）不属于框架内建能力，可通过外部扩展集成。
+
 ## 中间件链（ginx）
 
 GoBase 使用 [ginx](https://github.com/simp-lee/ginx) 库的 `Chain` API 组合中间件链，支持条件组合和响应定制：
@@ -380,7 +482,7 @@ GoBase 使用 [ginx](https://github.com/simp-lee/ginx) 库的 `Chain` API 组合
 | `page` | 页码（从 1 开始，默认 1） | `page=2` |
 | `page_size` | 每页数量（默认 20，最大 100） | `page_size=10` |
 | `sort` | 排序字段和方向（`字段:asc` 或 `字段:desc`） | `sort=name:asc` |
-| `字段名` | 精确匹配过滤 | `email=test@example.com` |
+| `字段名` | 精确匹配过滤 | `email=test@example.com`、`username=admin` |
 | `字段名__like` | 模糊匹配过滤（LIKE %value%） | `name__like=张` |
 
 ### 请求示例
@@ -677,6 +779,7 @@ Product 包含字段：Name (string), Price (float64), Category (string)
 | `PageRequest` / `PageResult[T]` 在 domain 层 | 分页是领域概念（"获取第 N 页数据"），非基础设施细节 |
 | 环境变量用 `__` 分隔 | 单下划线保留给配置键名（如 `max_idle_conns`），双下划线 `__` 表示层级 |
 | CSRF 仅在页面路由 | API 由外部客户端调用，使用 Token 认证；页面表单才需要 CSRF |
+| User `status` 字段 | 支持 `active` / `disabled` / `pending` 三种状态，仅 admin 可修改 |
 
 ### 常见 AI 生成错误及纠正
 
@@ -688,6 +791,7 @@ Product 包含字段：Name (string), Price (float64), Category (string)
 | `errors.Is(err, domain.ErrNotFound)` | 使用 `domain.IsNotFound(err)`（基于错误码判断） |
 | 忘记在 Repository 方法中传递 `ctx` | 所有 DB 操作须 `db.WithContext(ctx)` |
 | 分页不使用白名单 | Sort / Filter 必须传入 allowed 字段列表 |
+| 缺少 `status` 字段处理 | User 更新支持 `status` 字段（`active` / `disabled` / `pending`），仅 admin 可变更 |
 
 ## 许可证
 
